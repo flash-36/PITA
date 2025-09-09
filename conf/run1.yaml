@@ -1,0 +1,11 @@
+# Example run config; use via: python run.py --config-name run1
+
+defaults:
+  - config
+
+experiment:
+  name: run1
+
+algos:
+  PITA:
+    eta: 10

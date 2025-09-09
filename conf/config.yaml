@@ -1,0 +1,40 @@
+# Base config
+
+# Mandatory experiment name; used in output path and logging
+experiment:
+  name: "???"
+  seed: 42
+
+# Global/common hyperparams
+common:
+  max_new_tokens: 1024
+  temperature: 0.8
+  top_p: 0.9
+  dtype: bfloat16
+  use_chat_template: true
+
+# Algorithms (present = enabled). Each entry holds algo-specific hyperparams
+algos: {}
+
+# Model pairs; map of ref -> classifier
+model_pairs:
+  llama-7b: llama-1b
+  gpt-oss-60b: llama-7b
+
+# Datasets (present = enabled). Each entry holds dataset-specific hyperparams
+datasets:
+  AIME:
+    hf_config: AIME2025-I
+    split: test
+    question_key: problem
+    answer_key: answer
+
+# Hydra output directory
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${experiment.name}-${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${experiment.name}-${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+
+ 
