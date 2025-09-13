@@ -18,3 +18,4 @@ dependencies:
       - datasets==3.0.2
       - transformers==4.45.2
       - torch==2.4.1
+      - pyarrow==17.0.0

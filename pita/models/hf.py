@@ -38,11 +38,15 @@ class HFModel:
 
     def build_prompt(self, instruction: str) -> str:
         # Basic wrapper; can be extended per model with chat templates
-        if self.gen_cfg.use_chat_template and hasattr(self.tokenizer, "apply_chat_template"):
+        if self.gen_cfg.use_chat_template and hasattr(
+            self.tokenizer, "apply_chat_template"
+        ):
             messages = [
                 {"role": "user", "content": instruction},
             ]
-            return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            return self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
         return instruction
 
     @torch.inference_mode()
@@ -58,4 +62,43 @@ class HFModel:
         )
         text = self.tokenizer.decode(output[0], skip_special_tokens=True)
         # Return only the completion after the prompt
-        return text[len(prompt):].strip()
+        return text[len(prompt) :].strip()
+
+    @torch.inference_mode()
+    def roll_in(self, full_prompt: str, max_roll_tokens: int) -> Dict[str, Any]:
+        """Greedy rollout for t steps to obtain context s_t.
+
+        Returns dict with keys: prompt, context_ids, context_text.
+        """
+        ids = self.tokenizer(full_prompt, return_tensors="pt").to(self.model.device)
+        out = self.model.generate(
+            **ids,
+            max_new_tokens=max_roll_tokens,
+            do_sample=False,
+            temperature=1.0,
+            top_p=1.0,
+            pad_token_id=self.tokenizer.eos_token_id,
+        )
+        full_text = self.tokenizer.decode(out[0], skip_special_tokens=True)
+        context_text = full_text  # greedy continuation included
+        return {
+            "prompt": full_prompt,
+            "context_ids": out[0],
+            "context_text": context_text,
+        }
+
+    @torch.inference_mode()
+    def continue_from_context(
+        self, context_text: str, max_new_tokens: int, greedy: bool
+    ) -> str:
+        ids = self.tokenizer(context_text, return_tensors="pt").to(self.model.device)
+        out = self.model.generate(
+            **ids,
+            max_new_tokens=max_new_tokens,
+            do_sample=not greedy,
+            temperature=self.gen_cfg.temperature if not greedy else 1.0,
+            top_p=self.gen_cfg.top_p if not greedy else 1.0,
+            pad_token_id=self.tokenizer.eos_token_id,
+        )
+        text = self.tokenizer.decode(out[0], skip_special_tokens=True)
+        return text[len(context_text) :].strip()

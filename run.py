@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
+import random
 
 import hydra
+from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 from loguru import logger
 
 from pita.core.io import create_subdir, save_json
+from pita.core.collect import collect_datasets
 from pita.core.registry import get_algorithm_registry
 import pita.algos  # trigger registration imports
 from pita.plotting.hooks import plot_after_run
+from pita.models.hf import HFModel, GenerationConfig
+from pita.models.registry import resolve_family_pair
+from datasets import Dataset
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -28,16 +34,17 @@ def main(cfg: DictConfig) -> None:
     all_results: Dict[str, Any] = {}
 
     model_pairs = []
-    if isinstance(cfg.model_pairs, dict):
-        for ref_name, clf_name in cfg.model_pairs.items():
-            model_pairs.append((str(ref_name), str(clf_name)))
-    elif isinstance(cfg.model_pairs, list):
-        for pair in cfg.model_pairs:
-            model_pairs.append((str(pair.get("ref")), str(pair.get("cls"))))
+    if isinstance(cfg.model_pairs, list):
+        for family in cfg.model_pairs:
+            ref_alias, cls_alias = resolve_family_pair(str(family))
+            model_pairs.append((ref_alias, cls_alias))
     else:
-        raise ValueError("model_pairs must be a mapping or list of {ref, cls}")
+        raise ValueError("model_pairs must be a list of families")
 
     datasets = list(cfg.get("datasets", {}).keys())
+
+    # Pre-collect datasets (skips if already present)
+    collect_datasets(cfg)
 
     algo_registry = get_algorithm_registry()
 
