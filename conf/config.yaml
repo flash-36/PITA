@@ -7,17 +7,17 @@ experiment:
 
 # Global/common hyperparams
 common:
-  max_new_tokens: 1024
+  max_new_tokens: 256
   temperature: 0.8
   top_p: 0.9
-  dtype: bfloat16
+  dtype: float16
   use_chat_template: true
 
 # Data collection hyperparams
 collection:
   samples_per_example: 4
   seed: 47
-  # max_examples: 2
+  max_examples: 2
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
@@ -40,16 +40,16 @@ datasets:
     split: test
     question_key: question
     answer_key: answer
-  GSM8K:
-    hf_config: main
-    split: train
-    question_key: question
-    answer_key: answer
-  MATH:
-    hf_config: ""
-    split: train
-    question_key: problem
-    answer_key: answer
+  # GSM8K:
+  #   hf_config: main
+  #   split: train
+  #   question_key: question
+  #   answer_key: answer
+  # MATH:
+  #   hf_config: ""
+  #   split: train
+  #   question_key: problem
+  #   answer_key: answer
 
 # Hydra output directory
 hydra:

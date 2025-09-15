@@ -63,6 +63,7 @@ class ValueGuidedAlgorithms(AlgorithmBase):
 
         family_cap = str(family).capitalize()
         hf_dir = ds_root / f"{dataset}_{family_cap}.hf"
+        csv_path = ds_root / f"{dataset}_{family_cap}.csv"
         if hf_dir.exists():
             return
 
@@ -118,17 +119,14 @@ class ValueGuidedAlgorithms(AlgorithmBase):
 
                 records.append(
                     {
-                        "dataset": dataset,
-                        "model_family": str(family),
-                        "model_alias": ref_model,
                         "question": ex.question,
                         "answer": ex.answer,
                         "prompt": prompt,
                         "t": cutoff_tokens,
                         "context": context_text,
-                        "y_sample": y_sample,
-                        "y_ref": y_ref,
-                        "pref_sample_gt_ref": None,
+                        "y_a": y_ref,
+                        "y_b": y_sample,
+                        "preferred": None,
                     }
                 )
 
@@ -136,6 +134,7 @@ class ValueGuidedAlgorithms(AlgorithmBase):
             return
         hf_ds = Dataset.from_list(records)
         hf_ds.save_to_disk(str(hf_dir))
+        hf_ds.to_csv(str(csv_path))
 
 
 class PostTrainingAlgorithms(AlgorithmBase):
@@ -168,6 +167,7 @@ class PostTrainingAlgorithms(AlgorithmBase):
 
         family_cap = str(family).capitalize()
         hf_dir = ds_root / f"{dataset}_{family_cap}.hf"
+        csv_path = ds_root / f"{dataset}_{family_cap}.csv"
         if hf_dir.exists():
             return
 
@@ -195,9 +195,6 @@ class PostTrainingAlgorithms(AlgorithmBase):
                 )
                 records.append(
                     {
-                        "dataset": dataset,
-                        "model_family": str(family),
-                        "model_alias": ref_model,
                         "question": ex.question,
                         "answer": ex.answer,
                         "prompt": prompt,
@@ -211,3 +208,4 @@ class PostTrainingAlgorithms(AlgorithmBase):
             return
         hf_ds = Dataset.from_list(records)
         hf_ds.save_to_disk(str(hf_dir))
+        hf_ds.to_csv(str(csv_path))
