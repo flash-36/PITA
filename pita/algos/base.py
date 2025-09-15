@@ -8,6 +8,8 @@ import logging
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
 from datasets import Dataset
+from tqdm import tqdm
+from itertools import islice
 
 from pita.models.hf import HFModel, GenerationConfig
 from pita.datasets.registry import get_dataset
@@ -55,9 +57,6 @@ class ValueGuidedAlgorithms(AlgorithmBase):
     def generate_data(
         self, cfg: DictConfig, ref_model: str, dataset: str, family: str
     ) -> None:
-        if not cfg.get("collection", {}).get("enabled", True):
-            return
-
         orig_root = Path(get_original_cwd())
         ds_root = orig_root / "outputs" / "datasets" / self.algo_key
         ds_root.mkdir(parents=True, exist_ok=True)
@@ -75,7 +74,11 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         samples_per_example = int(cfg.collection.samples_per_example)
 
         records: List[Dict[str, Any]] = []
-        for ex in ds.iter():
+        max_examples = int(cfg.collection.get("max_examples", 0) or 0)
+        limit = max_examples if max_examples > 0 else len(ds)
+        for ex in tqdm(
+            islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
+        ):
             prompt = ds.hydrate_prompt(ex.question)
             rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
             rollout_text = rollout["context_text"]
@@ -159,9 +162,6 @@ class PostTrainingAlgorithms(AlgorithmBase):
     def generate_data(
         self, cfg: DictConfig, ref_model: str, dataset: str, family: str
     ) -> None:
-        if not cfg.get("collection", {}).get("enabled", True):
-            return
-
         orig_root = Path(get_original_cwd())
         ds_root = orig_root / "outputs" / "datasets" / self.algo_key
         ds_root.mkdir(parents=True, exist_ok=True)
@@ -179,7 +179,11 @@ class PostTrainingAlgorithms(AlgorithmBase):
         samples_per_example = int(cfg.collection.samples_per_example)
 
         records: List[Dict[str, Any]] = []
-        for ex in ds.iter():
+        max_examples = int(cfg.collection.get("max_examples", 0) or 0)
+        limit = max_examples if max_examples > 0 else len(ds)
+        for ex in tqdm(
+            islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
+        ):
             prompt = ds.hydrate_prompt(ex.question)
             built = model.build_prompt(prompt)
             for _ in range(samples_per_example):

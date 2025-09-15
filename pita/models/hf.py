@@ -21,7 +21,11 @@ class GenerationConfig:
 class HFModel:
     def __init__(self, name_or_id: str, gen_cfg: GenerationConfig):
         model_id = resolve_model_id(name_or_id)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            use_fast=True,
+            trust_remote_code=True,
+        )
         torch_dtype = {
             "bfloat16": torch.bfloat16,
             "float16": torch.float16,
@@ -31,8 +35,9 @@ class HFModel:
         }.get(gen_cfg.dtype, torch.bfloat16)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
             device_map="auto",
+            trust_remote_code=True,
         )
         self.gen_cfg = gen_cfg
 

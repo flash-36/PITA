@@ -15,9 +15,9 @@ common:
 
 # Data collection hyperparams
 collection:
-  enabled: true
-  samples_per_example: 4   # Number of samples per dataset example
+  samples_per_example: 4
   seed: 47
+  # max_examples: 2
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
@@ -38,6 +38,16 @@ datasets:
   AIME:
     hf_config: AIME2025-I
     split: test
+    question_key: question
+    answer_key: answer
+  GSM8K:
+    hf_config: main
+    split: train
+    question_key: question
+    answer_key: answer
+  MATH:
+    hf_config: ""
+    split: train
     question_key: problem
     answer_key: answer
 

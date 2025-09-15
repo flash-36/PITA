@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from pita.core.registry import AlgorithmBase, register_algorithm
+from pita.core.registry import register_algorithm
+from .base import AlgorithmBase
 
 
 @register_algorithm("BEST_OF_N")

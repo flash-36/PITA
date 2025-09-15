@@ -13,6 +13,7 @@ from loguru import logger
 from pita.core.io import create_subdir, save_json
 from pita.core.registry import get_algorithm_registry
 import pita.algos  # trigger registration imports
+import pita.datasets  # trigger dataset registration
 from pita.plotting.hooks import plot_after_run
 from pita.models.hf import HFModel, GenerationConfig
 from pita.models.registry import resolve_family_pair
@@ -33,14 +34,9 @@ def main(cfg: DictConfig) -> None:
     all_results: Dict[str, Any] = {}
 
     model_pairs = []
-    if isinstance(cfg.model_pairs, list):
-        for family in cfg.model_pairs:
-            ref_alias, cls_alias = resolve_family_pair(str(family))
-            model_pairs.append((ref_alias, cls_alias))
-    else:
-        raise ValueError(
-            "model_pairs must be a list of valid model family names. \nSupported families: llama, gemma"
-        )
+    for family in cfg.model_pairs:
+        ref_model_alias, value_model_alias = resolve_family_pair(str(family))
+        model_pairs.append((str(family), ref_model_alias, value_model_alias))
 
     datasets = list(cfg.get("datasets", {}).keys())
     algo_registry = get_algorithm_registry()
@@ -51,40 +47,48 @@ def main(cfg: DictConfig) -> None:
             raise KeyError(f"Algorithm '{algo_key}' is not registered")
         algo = algo_cls(algo_cfg)
 
-        for ref_name, clf_name in model_pairs:
+        for family_name, ref_model_alias, value_model_alias in model_pairs:
             for dataset_name in datasets:
                 # Algorithm-specific data collection (skips if already present)
-                if hasattr(algo, "generate_data"):
-                    family_name = (
-                        ref_name.split("-")[0] if "-" in ref_name else ref_name
-                    )
-                    algo.generate_data(
-                        cfg=cfg,
-                        ref_model=ref_name,
-                        dataset=dataset_name,
-                        family=family_name,
-                    )
                 logger.info(
-                    "Running algo={} on dataset={} with pair={} vs {}",
+                    "Generating data for algo={} on dataset={} with model_pair={} and {}",
                     algo_key,
                     dataset_name,
-                    ref_name,
-                    clf_name,
+                    ref_model_alias,
+                    value_model_alias,
+                )
+                algo.generate_data(
+                    cfg=cfg,
+                    ref_model=ref_model_alias,
+                    dataset=dataset_name,
+                    family=family_name,
+                )
+                logger.info(
+                    "Running algo={} on dataset={} with model_pair={} and {}",
+                    algo_key,
+                    dataset_name,
+                    ref_model_alias,
+                    value_model_alias,
                 )
                 out_dir = create_subdir(
                     run_root,
-                    ["results", algo_key, f"{ref_name}_vs_{clf_name}", dataset_name],
+                    [
+                        "results",
+                        algo_key,
+                        f"{ref_model_alias}_vs_{value_model_alias}",
+                        dataset_name,
+                    ],
                 )
                 result = algo.run(
                     cfg=cfg,
-                    ref_model=ref_name,
-                    cls_model=clf_name,
+                    ref_model=ref_model_alias,
+                    cls_model=value_model_alias,
                     dataset=dataset_name,
                     output_dir=out_dir,
                 )
                 save_json(out_dir / "result.json", result or {})
                 all_results.setdefault(algo_key, {}).setdefault(
-                    f"{ref_name}_vs_{clf_name}", {}
+                    f"{ref_model_alias}_vs_{value_model_alias}", {}
                 )[dataset_name] = result
 
     figs_dir = create_subdir(run_root, ["figures"])  # separate from raw results
