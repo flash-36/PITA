@@ -6,17 +6,17 @@ from pita.core.registry import register_algorithm
 from .base import ValueGuidedAlgorithms
 
 
-@register_algorithm("Q#HF")
-class QSharpHFAlgorithm(ValueGuidedAlgorithms):
-    ALGO_KEY = "Q#HF"
+@register_algorithm("Q#")
+class QSharpAlgorithm(ValueGuidedAlgorithms):
+    ALGO_KEY = "Q#"
 
     def run(
         self, cfg, ref_model: str, cls_model: str, dataset: str, output_dir
     ) -> Dict[str, Any]:
         return {
-            "algo": "Q#HF",
+            "algo": "Q#",
             "ref_model": ref_model,
             "cls_model": cls_model,
             "dataset": dataset,
-            "metrics": {"dummy_reward": 0.0},
+            "metrics": {"dummy": 0.0},
         }

@@ -11,7 +11,6 @@ from omegaconf import DictConfig, OmegaConf
 from loguru import logger
 
 from pita.core.io import create_subdir, save_json
-from pita.core.collect import collect_datasets
 from pita.core.registry import get_algorithm_registry
 import pita.algos  # trigger registration imports
 from pita.plotting.hooks import plot_after_run
@@ -39,13 +38,11 @@ def main(cfg: DictConfig) -> None:
             ref_alias, cls_alias = resolve_family_pair(str(family))
             model_pairs.append((ref_alias, cls_alias))
     else:
-        raise ValueError("model_pairs must be a list of families")
+        raise ValueError(
+            "model_pairs must be a list of valid model family names. \nSupported families: llama, gemma"
+        )
 
     datasets = list(cfg.get("datasets", {}).keys())
-
-    # Pre-collect datasets (skips if already present)
-    collect_datasets(cfg)
-
     algo_registry = get_algorithm_registry()
 
     for algo_key, algo_cfg in cfg.algos.items():
@@ -56,6 +53,17 @@ def main(cfg: DictConfig) -> None:
 
         for ref_name, clf_name in model_pairs:
             for dataset_name in datasets:
+                # Algorithm-specific data collection (skips if already present)
+                if hasattr(algo, "generate_data"):
+                    family_name = (
+                        ref_name.split("-")[0] if "-" in ref_name else ref_name
+                    )
+                    algo.generate_data(
+                        cfg=cfg,
+                        ref_model=ref_name,
+                        dataset=dataset_name,
+                        family=family_name,
+                    )
                 logger.info(
                     "Running algo={} on dataset={} with pair={} vs {}",
                     algo_key,

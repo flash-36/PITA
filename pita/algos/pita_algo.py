@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from pita.core.registry import AlgorithmBase, register_algorithm
+from pita.core.registry import register_algorithm
+from .base import ValueGuidedAlgorithms
 from pita.models.hf import HFModel, GenerationConfig
 from pita.datasets.registry import get_dataset
 
 
 @register_algorithm("PITA")
-class PITAAlgorithm(AlgorithmBase):
+class PITAAlgorithm(ValueGuidedAlgorithms):
+    ALGO_KEY = "PITA"
+
     def run(
         self, cfg, ref_model: str, cls_model: str, dataset: str, output_dir
     ) -> Dict[str, Any]:

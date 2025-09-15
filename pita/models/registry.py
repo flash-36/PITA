@@ -4,16 +4,16 @@ from typing import Dict, Tuple
 
 # Map friendly aliases to HF model ids; fall back if unknown
 _ALIAS_TO_ID: Dict[str, str] = {
-    "llama-1b": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    "llama-7b": "meta-llama/Meta-Llama-3-8B-Instruct",
-    "gemma-2b": "google/gemma-2-2b-it",
-    "gemma-9b": "google/gemma-2-9b-it",
+    "llama-1b": "meta-llama/Llama-3.2-1B-Instruct",
+    "llama-3b": "meta-llama/Llama-3.2-3B-Instruct",
+    "gemma-1b": "google/gemma-3-1b-it",
+    "gemma-4b": "google/gemma-3-4b-it",
 }
 
 # Families map to (ref, cls) concrete aliases
 _FAMILY_TO_PAIR: Dict[str, Tuple[str, str]] = {
-    "llama": ("llama-7b", "llama-1b"),
-    "gemma": ("gemma-9b", "gemma-2b"),
+    "llama": ("llama-3b", "llama-1b"),
+    "gemma": ("gemma-4b", "gemma-1b"),
 }
 
 

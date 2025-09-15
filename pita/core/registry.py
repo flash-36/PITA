@@ -3,14 +3,6 @@ from __future__ import annotations
 from typing import Dict, Type
 
 
-class AlgorithmBase:
-    def __init__(self, cfg):
-        self.cfg = cfg
-
-    def run(self, cfg, ref_model: str, cls_model: str, dataset: str, output_dir):
-        raise NotImplementedError
-
-
 _ALGO_REGISTRY: Dict[str, Type[AlgorithmBase]] = {}
 
 

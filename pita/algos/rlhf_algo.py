@@ -3,18 +3,18 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from pita.core.registry import register_algorithm
-from .base import ValueGuidedAlgorithms
+from .base import PostTrainingAlgorithms
 
 
-@register_algorithm("Q#HF")
-class QSharpHFAlgorithm(ValueGuidedAlgorithms):
-    ALGO_KEY = "Q#HF"
+@register_algorithm("RLHF")
+class RLHFAlgorithm(PostTrainingAlgorithms):
+    ALGO_KEY = "RLHF"
 
     def run(
         self, cfg, ref_model: str, cls_model: str, dataset: str, output_dir
     ) -> Dict[str, Any]:
         return {
-            "algo": "Q#HF",
+            "algo": "RLHF",
             "ref_model": ref_model,
             "cls_model": cls_model,
             "dataset": dataset,

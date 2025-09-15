@@ -16,13 +16,17 @@ common:
 # Data collection hyperparams
 collection:
   enabled: true
-  contexts_per_example: 1  # N
-  rollout_max_steps: 32    # T (tokens)
-  responses_per_context: 4 # M
+  samples_per_example: 4   # Number of samples per dataset example
   seed: 47
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
-algos: {}
+algos:
+  PITA: {}
+  Q#: {}
+  Q#HF: {}
+  DPO: {}
+  RLHF: {}
+  BEST_OF_N: {}
 
 # Model pairs; map of ref -> classifier
 model_pairs:
