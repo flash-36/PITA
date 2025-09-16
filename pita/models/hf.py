@@ -35,7 +35,7 @@ class HFModel:
         }.get(gen_cfg.dtype, torch.bfloat16)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            dtype=torch_dtype,
+            torch_dtype=torch_dtype,
             device_map="auto",
             trust_remote_code=True,
         )
@@ -56,18 +56,18 @@ class HFModel:
 
     @torch.inference_mode()
     def generate_text(self, prompt: str) -> str:
-        input_ids = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
         output = self.model.generate(
-            **input_ids,
+            **inputs,
             max_new_tokens=self.gen_cfg.max_new_tokens,
             do_sample=True,
             temperature=self.gen_cfg.temperature,
             top_p=self.gen_cfg.top_p,
             pad_token_id=self.tokenizer.eos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
         )
-        text = self.tokenizer.decode(output[0], skip_special_tokens=True)
-        # Return only the completion after the prompt
-        return text[len(prompt) :].strip()
+        new_tokens = output[0][inputs["input_ids"].shape[1] :]
+        return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
     @torch.inference_mode()
     def roll_in(self, full_prompt: str, max_roll_tokens: int) -> Dict[str, Any]:
@@ -75,7 +75,8 @@ class HFModel:
 
         Returns dict with keys: prompt, context_ids, context_text.
         """
-        ids = self.tokenizer(full_prompt, return_tensors="pt").to(self.model.device)
+        built = self.build_prompt(full_prompt)
+        ids = self.tokenizer(built, return_tensors="pt").to(self.model.device)
         out = self.model.generate(
             **ids,
             max_new_tokens=max_roll_tokens,
@@ -83,12 +84,21 @@ class HFModel:
             temperature=1.0,
             top_p=1.0,
             pad_token_id=self.tokenizer.eos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
         )
-        full_text = self.tokenizer.decode(out[0], skip_special_tokens=True)
-        context_text = full_text  # greedy continuation included
+        tokens = out[0]
+        eos_id = self.tokenizer.eos_token_id
+        prompt_len = ids["input_ids"].shape[1]
+        end = tokens.shape[0]
+        while (
+            end > prompt_len and eos_id is not None and tokens[end - 1].item() == eos_id
+        ):
+            end -= 1
+        context_tokens = tokens[:end]
+        context_text = self.tokenizer.decode(context_tokens, skip_special_tokens=True)
         return {
-            "prompt": full_prompt,
-            "context_ids": out[0],
+            "prompt": built,
+            "context_ids": context_tokens,
             "context_text": context_text,
         }
 
@@ -104,6 +114,7 @@ class HFModel:
             temperature=self.gen_cfg.temperature if not greedy else 1.0,
             top_p=self.gen_cfg.top_p if not greedy else 1.0,
             pad_token_id=self.tokenizer.eos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
         )
-        text = self.tokenizer.decode(out[0], skip_special_tokens=True)
-        return text[len(context_text) :].strip()
+        new_tokens = out[0][ids["input_ids"].shape[1] :]
+        return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()

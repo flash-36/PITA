@@ -10,7 +10,7 @@ common:
   max_new_tokens: 1024
   temperature: 0.8
   top_p: 0.9
-  dtype: float16
+  dtype: bfloat16
   use_chat_template: true
 
 # Data collection hyperparams
@@ -30,21 +30,21 @@ algos:
 
 # Model pairs; map of ref -> classifier
 model_pairs:
-  - llama
   - gemma
+  # - llama
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
 datasets:
-  AIME:
-    hf_config: AIME2025-I
-    split: test
-    question_key: question
-    answer_key: answer
-  # GSM8K:
-  #   hf_config: main
-  #   split: train
+  # AIME:
+  #   hf_config: AIME2025-I
+  #   split: test
   #   question_key: question
   #   answer_key: answer
+  GSM8K:
+    hf_config: main
+    split: train
+    question_key: question
+    answer_key: answer
   # MATH:
   #   hf_config: ""
   #   split: train

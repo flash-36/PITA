@@ -84,9 +84,16 @@ class ValueGuidedAlgorithms(AlgorithmBase):
             rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
             rollout_text = rollout["context_text"]
 
-            prompt_token_count = len(model.tokenizer(prompt)["input_ids"])
-            full_token_count = len(model.tokenizer(rollout_text)["input_ids"])
-            rollout_token_count = full_token_count - prompt_token_count
+            built_prompt = rollout["prompt"]
+            prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
+            context_token_ids = rollout["context_ids"].tolist()
+
+            # Deal with trailing EOS tokens
+            eos_id = model.tokenizer.eos_token_id
+            end = len(context_token_ids)
+            while end > 0 and context_token_ids[end - 1] == eos_id:
+                end -= 1
+            rollout_token_count = end - prompt_token_count
 
             if rollout_token_count < 2:
                 logger.info(
@@ -101,12 +108,15 @@ class ValueGuidedAlgorithms(AlgorithmBase):
             for _ in range(samples_per_example):
                 cutoff_tokens = random.randint(1, rollout_token_count - 1)
 
-                rollout_token_ids = model.tokenizer(rollout_text)["input_ids"]
-                context_token_ids = rollout_token_ids[
+                context_prefix_ids = context_token_ids[
                     : prompt_token_count + cutoff_tokens
                 ]
                 context_text = model.tokenizer.decode(
-                    context_token_ids, skip_special_tokens=True
+                    context_prefix_ids, skip_special_tokens=True
+                )
+                solution_prefix_ids = context_prefix_ids[prompt_token_count:]
+                solution_prefix_text = model.tokenizer.decode(
+                    solution_prefix_ids, skip_special_tokens=True
                 )
 
                 remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
@@ -123,9 +133,9 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                         "answer": ex.answer,
                         "prompt": prompt,
                         "t": cutoff_tokens,
-                        "context": context_text,
-                        "y_a": y_ref,
-                        "y_b": y_sample,
+                        "context": prompt + solution_prefix_text,
+                        "y_a": solution_prefix_text + y_ref,
+                        "y_b": solution_prefix_text + y_sample,
                         "preferred": None,
                     }
                 )

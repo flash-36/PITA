@@ -58,3 +58,6 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             "metrics": {"accuracy": acc},
             "predictions": preds[:50],
         }
+
+    def score_samples(self, y_a: str, y_b: str) -> Tuple[float, float, int]:
+        return 0.0, 0.0, 0
