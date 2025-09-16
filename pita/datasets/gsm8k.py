@@ -31,15 +31,14 @@ class GSM8K:
     @staticmethod
     def hydrate_prompt(question: str) -> str:
         return (
-            "You are a careful mathematician. Solve the following problem.\n"
-            "Provide ONLY the final numeric answer on the last line after the word Answer:.\n\n"
-            f"Problem: {question}\n\nAnswer:"
+            f"Problem:\n\n{question} Write your answer inside \\boxed{{}}.\n\nSolution:"
         )
 
     @staticmethod
     def extract_numeric(text: str) -> str:
-        # GSM8K answers end with a line like '#### 42'; use trailing number
         import re
 
-        candidates = re.findall(r"-?\d+", text)
-        return candidates[-1] if candidates else ""
+        m = re.search(r"\\boxed\{([^}]*)\}", text)
+        if m:
+            return m.group(1).strip()
+        return ""
