@@ -31,25 +31,25 @@ algos:
 # Model pairs; map of ref -> classifier
 model_pairs:
   - gemma
-  # - llama
+  - llama
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
 datasets:
-  # AIME:
-  #   hf_config: AIME2025-I
-  #   split: test
-  #   question_key: question
-  #   answer_key: answer
+  AIME:
+    hf_config: AIME2025-I
+    split: test
+    question_key: question
+    answer_key: answer
   GSM8K:
     hf_config: main
     split: train
     question_key: question
     answer_key: answer
-  # MATH:
-  #   hf_config: ""
-  #   split: train
-  #   question_key: problem
-  #   answer_key: answer
+  MATH:
+    hf_config: ""
+    split: test
+    question_key: problem
+    answer_key: answer
 
 # Hydra output directory
 hydra:

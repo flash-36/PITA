@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 from pita.core.registry import register_algorithm
 from .base import ValueGuidedAlgorithms
@@ -20,3 +20,6 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
             "dataset": dataset,
             "metrics": {"dummy": 0.0},
         }
+
+    def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
+        return 0.0, 0.0, 0

@@ -80,12 +80,8 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         for ex in tqdm(
             islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
         ):
-            print("EOS ID:", model.tokenizer.eos_token_id)
-            print("PAD ID:", model.tokenizer.pad_token_id)
             prompt = ds.hydrate_prompt(ex.question)
             rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
-            print("rollout_ids:", rollout["context_ids"].tolist())
-            print("rollout_text:", rollout["context_text"])
 
             built_prompt = rollout["prompt"]
             prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
@@ -125,6 +121,11 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                     context_text, max_new_tokens=remaining_token_budget, greedy=False
                 )
 
+                y_a = solution_prefix_text + y_ref
+                y_b = solution_prefix_text + y_sample
+
+                score_a, score_b, preferred = self.score_samples(ex, y_a, y_b)
+
                 records.append(
                     {
                         "question": ex.question,
@@ -132,9 +133,11 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                         "prompt": prompt,
                         "t": cutoff_tokens,
                         "context": prompt + solution_prefix_text,
-                        "y_a": solution_prefix_text + y_ref,
-                        "y_b": solution_prefix_text + y_sample,
-                        "preferred": None,
+                        "y_a": y_a,
+                        "y_b": y_b,
+                        "score_a": score_a,
+                        "score_b": score_b,
+                        "preferred": preferred,
                     }
                 )
 
@@ -143,6 +146,9 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         hf_ds = Dataset.from_list(records)
         hf_ds.save_to_disk(str(hf_dir))
         hf_ds.to_csv(str(csv_path))
+
+    def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
+        raise NotImplementedError
 
 
 class PostTrainingAlgorithms(AlgorithmBase):

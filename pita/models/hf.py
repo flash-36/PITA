@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -26,7 +26,6 @@ class HFModel:
             use_fast=True,
             trust_remote_code=True,
         )
-        self.tokenizer.padding_side = "left"
         torch_dtype = {
             "bfloat16": torch.bfloat16,
             "float16": torch.float16,
@@ -41,6 +40,40 @@ class HFModel:
             trust_remote_code=True,
         )
         self.gen_cfg = gen_cfg
+        self.eos_token_ids = self._compute_eos_token_ids()
+        self.pad_token_id = self._compute_pad_token_id()
+
+    def _compute_eos_token_ids(self) -> List[int]:
+        eos_ids: List[int] = []
+        base_eos = getattr(self.tokenizer, "eos_token_id", None)
+        if isinstance(base_eos, int):
+            eos_ids.append(base_eos)
+        unk_id = getattr(self.tokenizer, "unk_token_id", None)
+        for tok in [
+            "<end_of_turn>",
+            "<|end_of_turn|>",
+            "<|eot_id|>",
+            "<|im_end|>",
+            "<|end|>",
+        ]:
+            tid = self.tokenizer.convert_tokens_to_ids(tok)
+            if (
+                isinstance(tid, int)
+                and tid >= 0
+                and tid != unk_id
+                and tid not in eos_ids
+            ):
+                eos_ids.append(tid)
+        return eos_ids
+
+    def _compute_pad_token_id(self) -> int:
+        pad = getattr(self.tokenizer, "pad_token_id", None)
+        if isinstance(pad, int):
+            return pad
+        eos = getattr(self.tokenizer, "eos_token_id", None)
+        if isinstance(eos, list) and len(eos) > 0:
+            return eos[0]
+        return eos
 
     def build_prompt(self, instruction: str) -> str:
         # Basic wrapper; can be extended per model with chat templates
@@ -64,8 +97,8 @@ class HFModel:
             do_sample=True,
             temperature=self.gen_cfg.temperature,
             top_p=self.gen_cfg.top_p,
-            pad_token_id=self.tokenizer.eos_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.pad_token_id,
+            eos_token_id=self.eos_token_ids,
         )
         new_tokens = output[0][inputs["input_ids"].shape[1] :]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
@@ -84,8 +117,8 @@ class HFModel:
             do_sample=False,
             temperature=1.0,
             top_p=1.0,
-            pad_token_id=self.tokenizer.eos_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.pad_token_id,
+            eos_token_id=self.eos_token_ids,
         )
         context_tokens = out[0]
         context_text = self.tokenizer.decode(context_tokens, skip_special_tokens=True)
@@ -106,8 +139,8 @@ class HFModel:
             do_sample=not greedy,
             temperature=self.gen_cfg.temperature if not greedy else 1.0,
             top_p=self.gen_cfg.top_p if not greedy else 1.0,
-            pad_token_id=self.tokenizer.eos_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.pad_token_id,
+            eos_token_id=self.eos_token_ids,
         )
         new_tokens = out[0][ids["input_ids"].shape[1] :]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
