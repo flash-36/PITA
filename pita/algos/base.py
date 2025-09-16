@@ -80,20 +80,18 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         for ex in tqdm(
             islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
         ):
+            print("EOS ID:", model.tokenizer.eos_token_id)
+            print("PAD ID:", model.tokenizer.pad_token_id)
             prompt = ds.hydrate_prompt(ex.question)
             rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
-            rollout_text = rollout["context_text"]
+            print("rollout_ids:", rollout["context_ids"].tolist())
+            print("rollout_text:", rollout["context_text"])
 
             built_prompt = rollout["prompt"]
             prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
             context_token_ids = rollout["context_ids"].tolist()
-
-            # Deal with trailing EOS tokens
-            eos_id = model.tokenizer.eos_token_id
-            end = len(context_token_ids)
-            while end > 0 and context_token_ids[end - 1] == eos_id:
-                end -= 1
-            rollout_token_count = end - prompt_token_count
+            full_token_count = len(context_token_ids)
+            rollout_token_count = full_token_count - prompt_token_count
 
             if rollout_token_count < 2:
                 logger.info(

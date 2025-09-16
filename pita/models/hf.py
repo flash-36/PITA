@@ -26,6 +26,7 @@ class HFModel:
             use_fast=True,
             trust_remote_code=True,
         )
+        self.tokenizer.padding_side = "left"
         torch_dtype = {
             "bfloat16": torch.bfloat16,
             "float16": torch.float16,
@@ -86,15 +87,7 @@ class HFModel:
             pad_token_id=self.tokenizer.eos_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
         )
-        tokens = out[0]
-        eos_id = self.tokenizer.eos_token_id
-        prompt_len = ids["input_ids"].shape[1]
-        end = tokens.shape[0]
-        while (
-            end > prompt_len and eos_id is not None and tokens[end - 1].item() == eos_id
-        ):
-            end -= 1
-        context_tokens = tokens[:end]
+        context_tokens = out[0]
         context_text = self.tokenizer.decode(context_tokens, skip_special_tokens=True)
         return {
             "prompt": built,

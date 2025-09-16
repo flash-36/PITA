@@ -17,16 +17,16 @@ common:
 collection:
   samples_per_example: 4
   seed: 47
-  max_examples: 2
+  max_examples: 1
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
   PITA: {}
-  Q#: {}
-  Q#HF: {}
-  DPO: {}
-  RLHF: {}
-  BEST_OF_N: {}
+  # Q#: {}
+  # Q#HF: {}
+  # DPO: {}
+  # RLHF: {}
+  # BEST_OF_N: {}
 
 # Model pairs; map of ref -> classifier
 model_pairs:
