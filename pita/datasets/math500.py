@@ -35,10 +35,31 @@ class MATH500:
         )
 
     @staticmethod
-    def extract_numeric(text: str) -> str:
+    def is_correct(gold: str, pred_text: str) -> bool:
         import re
+        from math_verify import parse, verify
 
-        m = re.search(r"\\boxed\{([^}]*)\}", text)
-        if m:
-            return m.group(1).strip()
-        return ""
+        def extract_boxed_last(s: str) -> str:
+            matches = list(re.finditer(r"\\boxed\{", s))
+            if not matches:
+                return ""
+            start = matches[-1].end()
+            stack = 1
+            i = start
+            while i < len(s) and stack > 0:
+                if s[i] == "{":
+                    stack += 1
+                elif s[i] == "}":
+                    stack -= 1
+                i += 1
+            return s[start : i - 1].strip() if stack == 0 else ""
+
+        def eq(u: str, v: str) -> bool:
+            if not u or not v:
+                return False
+            if u == v:
+                return True
+            return verify(parse("$" + v + "$"), parse("$" + u + "$"))
+
+        pred_clean = extract_boxed_last(pred_text)
+        return eq(pred_clean, gold)

@@ -12,7 +12,7 @@ class BestOfNAlgorithm(AlgorithmBase):
 
     def generate_data(self, cfg, ref_model: str, dataset: str, family: str) -> None:
         # No data collection required for Best-of-N
-        return None
+        pass
 
     def run(
         self, cfg, ref_model: str, cls_model: str, dataset: str, output_dir

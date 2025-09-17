@@ -35,7 +35,7 @@ class HFModel:
         }.get(gen_cfg.dtype, torch.bfloat16)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
             device_map="auto",
             trust_remote_code=True,
         )

@@ -22,4 +22,9 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         }
 
     def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
-        return 0.0, 0.0, 0
+        ds = getattr(self, "_dataset", None)
+        if ds is None:
+            return 0.0, 0.0, None
+        score_a = 1.0 if ds.is_correct(ex.answer, y_a) else 0.0
+        score_b = 1.0 if ds.is_correct(ex.answer, y_b) else 0.0
+        return score_a, score_b, None

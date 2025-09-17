@@ -34,11 +34,42 @@ class GSM8K:
             f"Problem:\n\n{question} Write your answer inside \\boxed{{}}.\n\nSolution:"
         )
 
-    @staticmethod
-    def extract_numeric(text: str) -> str:
-        import re
 
-        m = re.search(r"\\boxed\{([^}]*)\}", text)
-        if m:
-            return m.group(1).strip()
-        return ""
+
+    @staticmethod
+    def is_correct(gold: str, pred_text: str) -> bool:
+        import re
+        from math_verify import parse, verify
+
+        def extract_boxed_last(s: str) -> str:
+            matches = list(re.finditer(r"\\boxed\{", s))
+            if not matches:
+                return ""
+            start = matches[-1].end()
+            stack = 1
+            i = start
+            while i < len(s) and stack > 0:
+                if s[i] == "{":
+                    stack += 1
+                elif s[i] == "}":
+                    stack -= 1
+                i += 1
+            return s[start : i - 1].strip() if stack == 0 else ""
+
+        def clean_gold(a: str) -> str:
+            g = extract_boxed_last(a)
+            if g:
+                return g
+            m = re.search(r"####\s*([^\n]+)", a)
+            return m.group(1).strip() if m else a.strip()
+
+        def eq(u: str, v: str) -> bool:
+            if not u or not v:
+                return False
+            if u == v:
+                return True
+            return verify(parse("$" + v + "$"), parse("$" + u + "$"))
+
+        gold_clean = clean_gold(gold)
+        pred_clean = extract_boxed_last(pred_text)
+        return eq(pred_clean, gold_clean)

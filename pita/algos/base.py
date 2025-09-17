@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import random
 import logging
 
@@ -10,6 +10,8 @@ from omegaconf import DictConfig
 from datasets import Dataset
 from tqdm import tqdm
 from itertools import islice
+import torch
+from transformers import AutoTokenizer, pipeline
 
 from pita.models.hf import HFModel, GenerationConfig
 from pita.datasets.registry import get_dataset
@@ -70,6 +72,7 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         random.seed(int(cfg.collection.seed))
         model = self._build_model(cfg, ref_model)
         ds = self._build_dataset(cfg, dataset)
+        self._dataset = ds
         gen_cfg = model.gen_cfg
 
         samples_per_example = int(cfg.collection.samples_per_example)
@@ -190,6 +193,22 @@ class PostTrainingAlgorithms(AlgorithmBase):
         ds = self._build_dataset(cfg, dataset)
         gen_cfg = model.gen_cfg
 
+        # reward model setup for preference scoring
+        ds_cfg = cfg.datasets[dataset]
+        rm_model = str(ds_cfg.reward_model)
+        device = 0 if torch.cuda.is_available() else -1
+        self._bt_sampling = bool(cfg.common.bt_sampling)
+        self._rm_tokenizer = AutoTokenizer.from_pretrained(
+            rm_model, use_fast=True, trust_remote_code=True
+        )
+        self._rm_pipe = pipeline(
+            "text-classification",
+            model=rm_model,
+            tokenizer=self._rm_tokenizer,
+            device=device,
+            model_kwargs={"torch_dtype": torch.bfloat16},
+        )
+
         samples_per_example = int(cfg.collection.samples_per_example)
 
         records: List[Dict[str, Any]] = []
@@ -207,6 +226,7 @@ class PostTrainingAlgorithms(AlgorithmBase):
                 y_b = model.continue_from_context(
                     built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
                 )
+                score_a, score_b, preferred = self.score_samples(ex, y_a, y_b)
                 records.append(
                     {
                         "question": ex.question,
@@ -214,7 +234,9 @@ class PostTrainingAlgorithms(AlgorithmBase):
                         "prompt": prompt,
                         "y_a": y_a,
                         "y_b": y_b,
-                        "preferred": None,
+                        "score_a": score_a,
+                        "score_b": score_b,
+                        "preferred": preferred,
                     }
                 )
 
@@ -223,3 +245,46 @@ class PostTrainingAlgorithms(AlgorithmBase):
         hf_ds = Dataset.from_list(records)
         hf_ds.save_to_disk(str(hf_dir))
         hf_ds.to_csv(str(csv_path))
+
+    def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
+        import math
+
+        rm_pipe = self._rm_pipe
+        rm_tok = self._rm_tokenizer
+
+        msgs_a = [
+            {"role": "user", "content": ex.question},
+            {"role": "assistant", "content": y_a},
+        ]
+        msgs_b = [
+            {"role": "user", "content": ex.question},
+            {"role": "assistant", "content": y_b},
+        ]
+        texts = [
+            rm_tok.apply_chat_template(
+                msgs_a, tokenize=False, add_generation_prompt=False
+            ),
+            rm_tok.apply_chat_template(
+                msgs_b, tokenize=False, add_generation_prompt=False
+            ),
+        ]
+
+        outs = rm_pipe(texts, top_k=None, function_to_apply="none", batch_size=2)
+        r_a = (
+            float(outs[0][0]["score"])
+            if isinstance(outs[0], list)
+            else float(outs[0]["score"])
+        )
+        r_b = (
+            float(outs[1][0]["score"])
+            if isinstance(outs[1], list)
+            else float(outs[1]["score"])
+        )
+
+        if self._bt_sampling:
+            beta = float(self.cfg.bt_beta)
+            p_a = 1.0 / (1.0 + math.exp(-beta * (r_a - r_b)))
+            preferred = 0 if random.random() < p_a else 1
+        else:
+            preferred = 0 if r_a >= r_b else 1
+        return r_a, r_b, preferred

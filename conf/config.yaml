@@ -12,6 +12,7 @@ common:
   top_p: 0.9
   dtype: bfloat16
   use_chat_template: true
+  bt_sampling: true
 
 # Data collection hyperparams
 collection:
@@ -21,12 +22,15 @@ collection:
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
-  PITA: {}
-  # Q#: {}
-  # Q#HF: {}
-  # DPO: {}
-  # RLHF: {}
-  # BEST_OF_N: {}
+  PITA:
+    bt_beta: 1.0
+  Q#: {}
+  Q#HF: {}
+  DPO: 
+    bt_beta: 1.0
+  RLHF:
+    bt_beta: 1.0
+  BEST_OF_N: {}
 
 # Model pairs; map of ref -> classifier
 model_pairs:
@@ -40,16 +44,19 @@ datasets:
     split: test
     question_key: question
     answer_key: answer
-  GSM8K:
-    hf_config: main
-    split: train
-    question_key: question
-    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+  # GSM8K:
+  #   hf_config: main
+  #   split: train
+  #   question_key: question
+  #   answer_key: answer
+  #   reward_model: weqweasdas/RM-Gemma-2B
   MATH:
     hf_config: ""
     split: test
     question_key: problem
     answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
 
 # Hydra output directory
 hydra:
