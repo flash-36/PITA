@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from datasets import load_dataset
+from .utils import extract_boxed_last, eq_math
 
 from .registry import register_dataset
 
@@ -36,30 +37,5 @@ class MATH500:
 
     @staticmethod
     def is_correct(gold: str, pred_text: str) -> bool:
-        import re
-        from math_verify import parse, verify
-
-        def extract_boxed_last(s: str) -> str:
-            matches = list(re.finditer(r"\\boxed\{", s))
-            if not matches:
-                return ""
-            start = matches[-1].end()
-            stack = 1
-            i = start
-            while i < len(s) and stack > 0:
-                if s[i] == "{":
-                    stack += 1
-                elif s[i] == "}":
-                    stack -= 1
-                i += 1
-            return s[start : i - 1].strip() if stack == 0 else ""
-
-        def eq(u: str, v: str) -> bool:
-            if not u or not v:
-                return False
-            if u == v:
-                return True
-            return verify(parse("$" + v + "$"), parse("$" + u + "$"))
-
         pred_clean = extract_boxed_last(pred_text)
-        return eq(pred_clean, gold)
+        return eq_math(pred_clean, gold)

@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
+from collections import Counter
+from pathlib import Path
 import random
-import logging
+from loguru import logger
 
 from omegaconf import DictConfig
-from datasets import Dataset
+from datasets import Dataset, load_from_disk, concatenate_datasets
 from tqdm import tqdm
 from itertools import islice
 import torch
 from transformers import AutoTokenizer, pipeline
 from pita.core.prompts import build_reward_model_prompt, build_instruction_prompt
+from pita.datasets.utils import extract_boxed_last
 
 from pita.models.hf import HFModel, GenerationConfig
 from pita.datasets.registry import get_dataset
-from pita.core.io import get_run_root
-
-
-logger = logging.getLogger(__name__)
+from pita.core.io import get_run_root, ensure_dir
 
 
 class AlgorithmBase:
@@ -28,11 +28,20 @@ class AlgorithmBase:
     def algo_key(self) -> str:
         return self.ALGO_KEY
 
-    def generate_data(self, cfg, ref_model: str, dataset: str, family: str) -> None:
+    def generate_data(
+        self, cfg, ref_model: str, dataset: str, family: str, round_idx: int
+    ) -> None:
         return None
 
     def run(
-        self, cfg, ref_model: str, cls_model: str, dataset: str, family: str, output_dir
+        self,
+        cfg,
+        ref_model: str,
+        cls_model: str,
+        dataset: str,
+        family: str,
+        output_dir,
+        round_idx: int,
     ):
         raise NotImplementedError
 
@@ -52,29 +61,40 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         ds_cfg = cfg.datasets[dataset_name]
         ds_cls = get_dataset(dataset_name)
         return ds_cls(
-            hf_config=str(ds_cfg.hf_config),
-            split=str(ds_cfg.split),
+            hf_config=str(ds_cfg.train_hf_config),
+            split=str(ds_cfg.train_split),
             question_key=str(ds_cfg.question_key),
             answer_key=str(ds_cfg.answer_key),
         )
 
+    def _build_test_dataset(self, cfg: DictConfig, dataset_name: str):
+        ds_cfg = cfg.datasets[dataset_name]
+        if "test_hf_config" in ds_cfg and "test_split" in ds_cfg:
+            ds_cls = get_dataset(dataset_name)
+            return ds_cls(
+                hf_config=str(ds_cfg.test_hf_config),
+                split=str(ds_cfg.test_split),
+                question_key=str(ds_cfg.question_key),
+                answer_key=str(ds_cfg.answer_key),
+            )
+        return None
+
     def generate_data(
-        self, cfg: DictConfig, ref_model: str, dataset: str, family: str
+        self, cfg: DictConfig, ref_model: str, dataset: str, family: str, round_idx: int
     ) -> None:
         run_root = get_run_root()
         ds_root = run_root / "datasets" / self.algo_key
         ds_root.mkdir(parents=True, exist_ok=True)
 
         family_cap = str(family).capitalize()
-        hf_dir = ds_root / f"{dataset}_{family_cap}.hf"
-        csv_path = ds_root / f"{dataset}_{family_cap}.csv"
-        if hf_dir.exists():
-            return
+        r = int(round_idx) + 1
+        snap_hf_prev = ds_root / f"{dataset}_{family_cap}_r{r-1}.hf" if r > 1 else None
+        snap_hf = ds_root / f"{dataset}_{family_cap}_r{r}.hf"
+        snap_csv = ds_root / f"{dataset}_{family_cap}_r{r}.csv"
 
         random.seed(int(cfg.collection.seed))
         model = self._build_model(cfg, ref_model)
         ds = self._build_dataset(cfg, dataset)
-        self._dataset = ds
         gen_cfg = model.gen_cfg
 
         samples_per_example = int(cfg.collection.samples_per_example)
@@ -148,9 +168,14 @@ class ValueGuidedAlgorithms(AlgorithmBase):
 
         if not records:
             return
-        hf_ds = Dataset.from_list(records)
-        hf_ds.save_to_disk(str(hf_dir))
-        hf_ds.to_csv(str(csv_path))
+        new_ds = Dataset.from_list(records)
+        if snap_hf_prev is not None and snap_hf_prev.exists():
+            old_ds = load_from_disk(str(snap_hf_prev))
+            merged = concatenate_datasets([old_ds, new_ds])
+        else:
+            merged = new_ds
+        merged.save_to_disk(str(snap_hf))
+        merged.to_csv(str(snap_csv))
 
     def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
         raise NotImplementedError
@@ -171,24 +196,36 @@ class PostTrainingAlgorithms(AlgorithmBase):
         ds_cfg = cfg.datasets[dataset_name]
         ds_cls = get_dataset(dataset_name)
         return ds_cls(
-            hf_config=str(ds_cfg.hf_config),
-            split=str(ds_cfg.split),
+            hf_config=str(ds_cfg.train_hf_config),
+            split=str(ds_cfg.train_split),
             question_key=str(ds_cfg.question_key),
             answer_key=str(ds_cfg.answer_key),
         )
 
+    def _build_test_dataset(self, cfg: DictConfig, dataset_name: str):
+        ds_cfg = cfg.datasets[dataset_name]
+        if "test_hf_config" in ds_cfg and "test_split" in ds_cfg:
+            ds_cls = get_dataset(dataset_name)
+            return ds_cls(
+                hf_config=str(ds_cfg.test_hf_config),
+                split=str(ds_cfg.test_split),
+                question_key=str(ds_cfg.question_key),
+                answer_key=str(ds_cfg.answer_key),
+            )
+        return None
+
     def generate_data(
-        self, cfg: DictConfig, ref_model: str, dataset: str, family: str
+        self, cfg: DictConfig, ref_model: str, dataset: str, family: str, round_idx: int
     ) -> None:
         run_root = get_run_root()
         ds_root = run_root / "datasets" / self.algo_key
         ds_root.mkdir(parents=True, exist_ok=True)
 
         family_cap = str(family).capitalize()
-        hf_dir = ds_root / f"{dataset}_{family_cap}.hf"
-        csv_path = ds_root / f"{dataset}_{family_cap}.csv"
-        if hf_dir.exists():
-            return
+        r = int(round_idx) + 1
+        snap_hf_prev = ds_root / f"{dataset}_{family_cap}_r{r-1}.hf" if r > 1 else None
+        snap_hf = ds_root / f"{dataset}_{family_cap}_r{r}.hf"
+        snap_csv = ds_root / f"{dataset}_{family_cap}_r{r}.csv"
 
         random.seed(int(cfg.collection.seed))
         model = self._build_model(cfg, ref_model)
@@ -248,9 +285,14 @@ class PostTrainingAlgorithms(AlgorithmBase):
 
         if not records:
             return
-        hf_ds = Dataset.from_list(records)
-        hf_ds.save_to_disk(str(hf_dir))
-        hf_ds.to_csv(str(csv_path))
+        new_ds = Dataset.from_list(records)
+        if snap_hf_prev is not None and snap_hf_prev.exists():
+            old_ds = load_from_disk(str(snap_hf_prev))
+            merged = concatenate_datasets([old_ds, new_ds])
+        else:
+            merged = new_ds
+        merged.save_to_disk(str(snap_hf))
+        merged.to_csv(str(snap_csv))
 
     def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
         import math
@@ -281,3 +323,64 @@ class PostTrainingAlgorithms(AlgorithmBase):
         else:
             preferred = 0 if r_a >= r_b else 1
         return r_a, r_b, preferred
+
+    def evaluate_pass1_maj8(
+        self,
+        cfg: DictConfig,
+        model: HFModel,
+        dataset: str,
+        save_dir: Optional[Path] = None,
+    ) -> Dict[str, float]:
+        ds = self._build_test_dataset(cfg, dataset)
+        if ds is None:
+            return {}
+
+        max_examples = int(cfg.collection.get("max_examples", 0) or 0)
+        limit = max_examples if max_examples > 0 else len(ds)
+
+        total = 0
+        pass1 = 0
+        maj8 = 0
+        rows: List[Dict[str, str]] = []
+        for ex in tqdm(islice(ds.iter(), limit), total=limit, desc=f"Eval:{dataset}"):
+            prompt = ds.hydrate_prompt(ex.question)
+            built = build_instruction_prompt(
+                prompt,
+                tokenizer=model.tokenizer,
+                use_chat_template=model.gen_cfg.use_chat_template,
+            )
+            preds: List[str] = [model.generate_text(built) for _ in range(8)]
+
+            if ds.is_correct(ex.answer, preds[0]):
+                pass1 += 1
+
+            norm = [extract_boxed_last(p) for p in preds]
+            counts = Counter(norm)
+            if counts:
+                top_str, top_cnt = max(counts.items(), key=lambda kv: kv[1])
+                if list(counts.values()).count(top_cnt) == 1:
+                    rep_idx = norm.index(top_str)
+                    if ds.is_correct(ex.answer, preds[rep_idx]):
+                        maj8 += 1
+
+            total += 1
+
+            rows.append(
+                {
+                    "question": ex.question,
+                    "answer": ex.answer,
+                    **{f"pred_{i+1}": preds[i] for i in range(8)},
+                }
+            )
+
+        if save_dir is not None:
+            ensure_dir(Path(save_dir))
+            ds_out = Dataset.from_list(rows)
+            ds_out.save_to_disk(str(Path(save_dir) / "eval_predictions.hf"))
+            ds_out.to_csv(str(Path(save_dir) / "eval_predictions.csv"))
+
+        return {
+            "pass@1": float(pass1 / max(1, total)),
+            "maj@8": float(maj8 / max(1, total)),
+            "num_examples": int(total),
+        }

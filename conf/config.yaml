@@ -14,6 +14,9 @@ common:
   use_chat_template: true
   bt_sampling: true
 
+# Number of iterative rounds: generate -> train -> regenerate -> train ...
+rounds_of_training: 2
+
 # Data collection hyperparams
 collection:
   samples_per_example: 4
@@ -47,21 +50,25 @@ model_pairs:
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
 datasets:
-  AIME:
-    hf_config: AIME2025-I
-    split: test
-    question_key: question
-    answer_key: answer
-    reward_model: weqweasdas/RM-Gemma-2B
-  # GSM8K:
-  #   hf_config: main
-  #   split: train
+  # AIME:
+  #   train_hf_config: AIME2025-I
+  #   train_split: test
   #   question_key: question
   #   answer_key: answer
   #   reward_model: weqweasdas/RM-Gemma-2B
+  #   test_hf_config: AIME2025-II
+  #   test_split: test
+  GSM8K:
+    train_hf_config: main
+    train_split: train
+    question_key: question
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: main
+    test_split: test
   # MATH:
-  #   hf_config: ""
-  #   split: test
+  #   train_hf_config: ""
+  #   train_split: test
   #   question_key: problem
   #   answer_key: answer
   #   reward_model: weqweasdas/RM-Gemma-2B
