@@ -63,29 +63,30 @@ def main(cfg: DictConfig) -> None:
                     dataset=dataset_name,
                     family=family_name,
                 )
-                # logger.info(
-                #     "Running algo={} on dataset={} with model_pair={} and {}",
-                #     algo_key,
-                #     dataset_name,
-                #     ref_model_alias,
-                #     value_model_alias,
-                # )
-                # out_dir = create_subdir(
-                #     run_root,
-                #     [
-                #         "results",
-                #         algo_key,
-                #         f"{ref_model_alias}_vs_{value_model_alias}",
-                #         dataset_name,
-                #     ],
-                # )
-                # result = algo.run(
-                #     cfg=cfg,
-                #     ref_model=ref_model_alias,
-                #     cls_model=value_model_alias,
-                #     dataset=dataset_name,
-                #     output_dir=out_dir,
-                # )
+                logger.info(
+                    "Running algo={} on dataset={} with model_pair={} and {}",
+                    algo_key,
+                    dataset_name,
+                    ref_model_alias,
+                    value_model_alias,
+                )
+                out_dir = create_subdir(
+                    run_root,
+                    [
+                        "results",
+                        algo_key,
+                        f"{ref_model_alias}_vs_{value_model_alias}",
+                        dataset_name,
+                    ],
+                )
+                result = algo.run(
+                    cfg=cfg,
+                    ref_model=ref_model_alias,
+                    cls_model=value_model_alias,
+                    dataset=dataset_name,
+                    family=family_name,
+                    output_dir=out_dir,
+                )
                 # save_json(out_dir / "result.json", result or {})
                 # all_results.setdefault(algo_key, {}).setdefault(
                 #     f"{ref_model_alias}_vs_{value_model_alias}", {}

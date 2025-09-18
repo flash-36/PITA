@@ -35,7 +35,7 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
         return super().generate_data(cfg, ref_model, dataset, family)
 
     def run(
-        self, cfg, ref_model: str, cls_model: str, dataset: str, output_dir
+        self, cfg, ref_model: str, cls_model: str, dataset: str, family: str, output_dir
     ) -> Dict[str, Any]:
         return {
             "algo": "PITA",

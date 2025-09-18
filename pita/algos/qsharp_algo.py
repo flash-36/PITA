@@ -11,7 +11,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
     ALGO_KEY = "Q#"
 
     def run(
-        self, cfg, ref_model: str, cls_model: str, dataset: str, output_dir
+        self, cfg, ref_model: str, cls_model: str, dataset: str, family: str, output_dir
     ) -> Dict[str, Any]:
         return {
             "algo": "Q#",

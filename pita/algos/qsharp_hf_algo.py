@@ -24,7 +24,7 @@ class QSharpHFAlgorithm(ValueGuidedAlgorithms):
         ), f"Missing PITA dataset: {pita_hf_dir} to be used for Q#HF"
 
     def run(
-        self, cfg, ref_model: str, cls_model: str, dataset: str, output_dir
+        self, cfg, ref_model: str, cls_model: str, dataset: str, family: str, output_dir
     ) -> Dict[str, Any]:
         return {
             "algo": "Q#HF",

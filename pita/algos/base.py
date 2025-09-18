@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 from typing import Any, Dict, List, Tuple
 import random
 import logging
@@ -31,7 +32,9 @@ class AlgorithmBase:
     def generate_data(self, cfg, ref_model: str, dataset: str, family: str) -> None:
         return None
 
-    def run(self, cfg, ref_model: str, cls_model: str, dataset: str, output_dir):
+    def run(
+        self, cfg, ref_model: str, cls_model: str, dataset: str, family: str, output_dir
+    ):
         raise NotImplementedError
 
 
@@ -59,8 +62,8 @@ class ValueGuidedAlgorithms(AlgorithmBase):
     def generate_data(
         self, cfg: DictConfig, ref_model: str, dataset: str, family: str
     ) -> None:
-        orig_root = Path(get_original_cwd())
-        ds_root = orig_root / "outputs" / "datasets" / self.algo_key
+        run_root = Path(os.getcwd())
+        ds_root = run_root / "datasets" / self.algo_key
         ds_root.mkdir(parents=True, exist_ok=True)
 
         family_cap = str(family).capitalize()
@@ -178,8 +181,8 @@ class PostTrainingAlgorithms(AlgorithmBase):
     def generate_data(
         self, cfg: DictConfig, ref_model: str, dataset: str, family: str
     ) -> None:
-        orig_root = Path(get_original_cwd())
-        ds_root = orig_root / "outputs" / "datasets" / self.algo_key
+        run_root = Path(os.getcwd())
+        ds_root = run_root / "datasets" / self.algo_key
         ds_root.mkdir(parents=True, exist_ok=True)
 
         family_cap = str(family).capitalize()

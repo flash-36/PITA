@@ -15,7 +15,7 @@ class BestOfNAlgorithm(AlgorithmBase):
         pass
 
     def run(
-        self, cfg, ref_model: str, cls_model: str, dataset: str, output_dir
+        self, cfg, ref_model: str, cls_model: str, dataset: str, family: str, output_dir
     ) -> Dict[str, Any]:
         return {
             "algo": "BEST_OF_N",
