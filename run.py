@@ -10,7 +10,7 @@ from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 from loguru import logger
 
-from pita.core.io import create_subdir, save_json
+from pita.core.io import create_subdir, save_json, get_run_root
 from pita.core.registry import get_algorithm_registry
 import pita.algos  # trigger registration imports
 import pita.datasets  # trigger dataset registration
@@ -28,7 +28,7 @@ def main(cfg: DictConfig) -> None:
     if exp_name in (None, "", "???"):
         raise ValueError("experiment.name must be set (non-empty)")
 
-    run_root = Path(os.getcwd())
+    run_root = get_run_root()
     logger.info("Run directory: {}", run_root)
 
     all_results: Dict[str, Any] = {}

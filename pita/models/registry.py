@@ -8,12 +8,15 @@ _ALIAS_TO_ID: Dict[str, str] = {
     "llama-3b": "meta-llama/Llama-3.2-3B-Instruct",
     "gemma-1b": "google/gemma-3-1b-it",
     "gemma-4b": "google/gemma-3-4b-it",
+    "gpt2-medium": "openai-community/gpt2-medium",
+    "gpt2": "openai-community/gpt2",
 }
 
 # Families map to (ref, cls) concrete aliases
 _FAMILY_TO_PAIR: Dict[str, Tuple[str, str]] = {
     "llama": ("llama-3b", "llama-1b"),
     "gemma": ("gemma-4b", "gemma-1b"),
+    "gpt": ("gpt2-medium", "gpt2"),
 }
 
 

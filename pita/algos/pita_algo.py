@@ -6,6 +6,7 @@ import random
 
 import torch
 from transformers import AutoTokenizer, pipeline
+from pita.core.prompts import build_reward_model_prompt
 
 from pita.core.registry import register_algorithm
 from .base import ValueGuidedAlgorithms
@@ -49,22 +50,9 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
         rm_pipe = self._rm_pipe
         rm_tok = self._rm_tokenizer
 
-        msgs_a = [
-            {"role": "user", "content": ex.question},
-            {"role": "assistant", "content": y_a},
-        ]
-        msgs_b = [
-            {"role": "user", "content": ex.question},
-            {"role": "assistant", "content": y_b},
-        ]
-        texts = [
-            rm_tok.apply_chat_template(
-                msgs_a, tokenize=False, add_generation_prompt=False
-            ),
-            rm_tok.apply_chat_template(
-                msgs_b, tokenize=False, add_generation_prompt=False
-            ),
-        ]
+        texts = build_reward_model_prompt(
+            question=ex.question, y_a=y_a, y_b=y_b, tokenizer=rm_tok
+        )
 
         outs = rm_pipe(texts, top_k=None, function_to_apply="none", batch_size=2)
         r_a = (

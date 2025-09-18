@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-from pathlib import Path
-import os
 from typing import Any, Dict, List, Tuple
 import random
 import logging
 
-from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
 from datasets import Dataset
 from tqdm import tqdm
 from itertools import islice
 import torch
 from transformers import AutoTokenizer, pipeline
+from pita.core.prompts import build_reward_model_prompt, build_instruction_prompt
 
 from pita.models.hf import HFModel, GenerationConfig
 from pita.datasets.registry import get_dataset
+from pita.core.io import get_run_root
 
 
 logger = logging.getLogger(__name__)
@@ -62,7 +61,7 @@ class ValueGuidedAlgorithms(AlgorithmBase):
     def generate_data(
         self, cfg: DictConfig, ref_model: str, dataset: str, family: str
     ) -> None:
-        run_root = Path(os.getcwd())
+        run_root = get_run_root()
         ds_root = run_root / "datasets" / self.algo_key
         ds_root.mkdir(parents=True, exist_ok=True)
 
@@ -181,7 +180,7 @@ class PostTrainingAlgorithms(AlgorithmBase):
     def generate_data(
         self, cfg: DictConfig, ref_model: str, dataset: str, family: str
     ) -> None:
-        run_root = Path(os.getcwd())
+        run_root = get_run_root()
         ds_root = run_root / "datasets" / self.algo_key
         ds_root.mkdir(parents=True, exist_ok=True)
 
@@ -221,7 +220,11 @@ class PostTrainingAlgorithms(AlgorithmBase):
             islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
         ):
             prompt = ds.hydrate_prompt(ex.question)
-            built = model.build_prompt(prompt)
+            built = build_instruction_prompt(
+                prompt,
+                tokenizer=model.tokenizer,
+                use_chat_template=model.gen_cfg.use_chat_template,
+            )
             for _ in range(samples_per_example):
                 y_a = model.continue_from_context(
                     built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
@@ -255,22 +258,9 @@ class PostTrainingAlgorithms(AlgorithmBase):
         rm_pipe = self._rm_pipe
         rm_tok = self._rm_tokenizer
 
-        msgs_a = [
-            {"role": "user", "content": ex.question},
-            {"role": "assistant", "content": y_a},
-        ]
-        msgs_b = [
-            {"role": "user", "content": ex.question},
-            {"role": "assistant", "content": y_b},
-        ]
-        texts = [
-            rm_tok.apply_chat_template(
-                msgs_a, tokenize=False, add_generation_prompt=False
-            ),
-            rm_tok.apply_chat_template(
-                msgs_b, tokenize=False, add_generation_prompt=False
-            ),
-        ]
+        texts = build_reward_model_prompt(
+            question=ex.question, y_a=y_a, y_b=y_b, tokenizer=rm_tok
+        )
 
         outs = rm_pipe(texts, top_k=None, function_to_apply="none", batch_size=2)
         r_a = (

@@ -10,6 +10,7 @@ from pita.trainers import PreferencePairDataset, DPOTrainer
 
 from pita.core.registry import register_algorithm
 from .base import PostTrainingAlgorithms
+from pita.core.io import get_run_root
 
 
 @register_algorithm("DPO")
@@ -20,9 +21,14 @@ class DPOAlgorithm(PostTrainingAlgorithms):
         self, cfg, ref_model: str, cls_model: str, dataset: str, family: str, output_dir
     ) -> Dict[str, Any]:
         logger = logging.getLogger(__name__)
+        logger.info(
+            "DPO start: dataset=%s family=%s",
+            dataset,
+            family,
+        )
 
         # Load dataset
-        run_root = Path(os.getcwd())
+        run_root = get_run_root()
         family_cap = str(family).capitalize()
         ds_root = run_root / "datasets" / self.algo_key
         hf_dir = ds_root / f"{dataset}_{family_cap}.hf"
@@ -41,21 +47,17 @@ class DPOAlgorithm(PostTrainingAlgorithms):
         )
 
         loader = trainer.create_loader(ds, shuffle=True)
-        stats = trainer.train(
-            loader, max_steps=int(self.cfg.max_steps), epochs=int(self.cfg.epochs)
-        )
+        stats = trainer.train(loader, epochs=int(self.cfg.epochs))
 
-        # Save checkpoints under Hydra run folder: models/<ALGO>/<ref_vs_cls>/<dataset>
-        pair_name = f"{ref_model}_vs_{cls_model}"
-        ckpt_dir = run_root / "models" / self.algo_key / pair_name / dataset
+        ckpt_dir = run_root / "models" / self.algo_key / f"{dataset}_{family_cap}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         try:
             trainer.policy.save_pretrained(str(ckpt_dir))
             trainer.tokenizer.save_pretrained(str(ckpt_dir))
         except Exception as e:
-            logger.warning("Failed to save model: {}", e)
+            logger.warning("Failed to save model: %s", e)
 
-        return {
+        result = {
             "algo": "DPO",
             "ref_model": ref_model,
             "cls_model": cls_model,
@@ -66,3 +68,10 @@ class DPOAlgorithm(PostTrainingAlgorithms):
                 "acc": float(stats.get("acc", 0.0) or 0.0),
             },
         }
+        logger.info(
+            "✅ DPO done: steps=%d loss=%.4f acc=%.4f",
+            int(result["metrics"]["trained_steps"]),
+            float(result["metrics"]["loss"]),
+            float(result["metrics"]["acc"]),
+        )
+        return result

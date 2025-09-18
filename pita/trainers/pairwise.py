@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset as TorchDataset, DataLoader
 from transformers import PreTrainedTokenizerBase
+from pita.core.prompts import build_instruction_prompt
 from datasets import load_from_disk, Dataset
 
 
@@ -65,19 +66,19 @@ class PairwiseTrainerBase:
         self.num_workers = int(num_workers)
         self.dtype_str = str(dtype)
 
-    def build_prompt(self, instruction: str) -> str:
-        if self.use_chat_template and hasattr(self.tokenizer, "apply_chat_template"):
-            messages = [{"role": "user", "content": instruction}]
-            return self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        return instruction
 
     def _tokenize_batch(
         self, batch: List[PairExample], max_length: Optional[int] = None
     ) -> Dict[str, torch.Tensor]:
         # Build prompt+response sequences for chosen and rejected
-        prompts = [self.build_prompt(ex.prompt) for ex in batch]
+        prompts = [
+            build_instruction_prompt(
+                ex.prompt,
+                tokenizer=self.tokenizer,
+                use_chat_template=self.use_chat_template,
+            )
+            for ex in batch
+        ]
         chosen_texts = [ex.chosen for ex in batch]
         rejected_texts = [ex.rejected for ex in batch]
 

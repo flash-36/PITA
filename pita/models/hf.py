@@ -7,6 +7,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from .registry import resolve_model_id
+from pita.core.prompts import build_instruction_prompt
 
 
 @dataclass
@@ -26,6 +27,12 @@ class HFModel:
             use_fast=True,
             trust_remote_code=True,
         )
+        added_special_tokens = False
+        if getattr(self.tokenizer, "pad_token_id", None) is None:
+            if getattr(self.tokenizer, "eos_token", None) is not None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            else:
+                raise ValueError("Pad token not found")
         torch_dtype = {
             "bfloat16": torch.bfloat16,
             "float16": torch.float16,
@@ -75,19 +82,6 @@ class HFModel:
             return eos[0]
         return eos
 
-    def build_prompt(self, instruction: str) -> str:
-        # Basic wrapper; can be extended per model with chat templates
-        if self.gen_cfg.use_chat_template and hasattr(
-            self.tokenizer, "apply_chat_template"
-        ):
-            messages = [
-                {"role": "user", "content": instruction},
-            ]
-            return self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        return instruction
-
     @torch.inference_mode()
     def generate_text(self, prompt: str) -> str:
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
@@ -109,7 +103,11 @@ class HFModel:
 
         Returns dict with keys: prompt, context_ids, context_text.
         """
-        built = self.build_prompt(full_prompt)
+        built = build_instruction_prompt(
+            full_prompt,
+            tokenizer=self.tokenizer,
+            use_chat_template=self.gen_cfg.use_chat_template,
+        )
         ids = self.tokenizer(built, return_tensors="pt").to(self.model.device)
         out = self.model.generate(
             **ids,

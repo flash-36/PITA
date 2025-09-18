@@ -7,7 +7,7 @@ experiment:
 
 # Global/common hyperparams
 common:
-  max_new_tokens: 1024
+  max_new_tokens: 256
   temperature: 0.8
   top_p: 0.9
   dtype: bfloat16
@@ -22,28 +22,28 @@ collection:
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
-  PITA:
-    bt_beta: 1.0
-  Q#: {}
-  Q#HF: {}
+  # PITA:
+  #   bt_beta: 1.0
+  # Q#: {}
+  # Q#HF: {}
   DPO:
     bt_beta: 1.0
     beta: 0.1
     lr: 2.0e-5
     weight_decay: 0.0
-    max_steps: 100
-    epochs: 1
+    epochs: 5
     grad_clip: 1.0
     batch_size: 2
     num_workers: 2
-  RLHF:
-    bt_beta: 1.0
-  BEST_OF_N: {}
+  # RLHF:
+  #   bt_beta: 1.0
+  # BEST_OF_N: {}
 
 # Model pairs; map of ref -> classifier
 model_pairs:
-  - gemma
-  - llama
+  # - gemma
+  # - llama
+  - gpt
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
 datasets:
@@ -59,12 +59,12 @@ datasets:
   #   question_key: question
   #   answer_key: answer
   #   reward_model: weqweasdas/RM-Gemma-2B
-  MATH:
-    hf_config: ""
-    split: test
-    question_key: problem
-    answer_key: answer
-    reward_model: weqweasdas/RM-Gemma-2B
+  # MATH:
+  #   hf_config: ""
+  #   split: test
+  #   question_key: problem
+  #   answer_key: answer
+  #   reward_model: weqweasdas/RM-Gemma-2B
 
 # Hydra output directory
 hydra:

@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM
+from tqdm import tqdm
 
 from .pairwise import PairwiseTrainerBase
 from pita.models.hf import HFModel
@@ -98,15 +98,17 @@ class DPOTrainer(PairwiseTrainerBase):
             }
         return {"loss": loss, "stats": stats}
 
-    def train(
-        self, loader: DataLoader, max_steps: Optional[int] = None, epochs: int = 1
-    ) -> Dict[str, Any]:
+    def train(self, loader: DataLoader, epochs: int = 1) -> Dict[str, Any]:
         self.policy.train()
-        max_steps = int(max_steps or int(self.cfg.max_steps))
         steps = 0
         accum = {"loss": 0.0, "acc": 0.0}
-        for _ in range(int(epochs)):
-            for batch in loader:
+        total_epochs = int(epochs)
+        epoch_bar = tqdm(range(total_epochs), desc="DPO:epochs")
+        for e in epoch_bar:
+            batch_bar = tqdm(
+                loader, desc=f"DPO:epoch {e + 1}/{total_epochs}", leave=False
+            )
+            for batch in batch_bar:
                 out = self.dpo_step(batch)
                 loss: torch.Tensor = out["loss"]
                 stats = out["stats"]
@@ -122,11 +124,11 @@ class DPOTrainer(PairwiseTrainerBase):
                 steps += 1
                 accum["loss"] += stats["loss"]
                 accum["acc"] += stats["acc"]
+                batch_bar.set_postfix(loss=stats["loss"], acc=stats["acc"])
 
-                if steps >= max_steps:
-                    break
-            if steps >= max_steps:
-                break
+            avg_loss = accum["loss"] / max(1, steps)
+            avg_acc = accum["acc"] / max(1, steps)
+            epoch_bar.set_postfix(avg_loss=f"{avg_loss:.4f}", avg_acc=f"{avg_acc:.4f}")
 
         n = max(1, steps)
         return {"loss": accum["loss"] / n, "acc": accum["acc"] / n, "steps": steps}
