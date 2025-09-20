@@ -16,6 +16,8 @@ from pita.core.prompts import build_reward_model_prompt, build_instruction_promp
 from pita.datasets.utils import extract_boxed_last
 
 from pita.models.hf import HFModel, GenerationConfig
+from pita.models.guided import GuidedHFModel
+from pita.models.value_classifier import ValueClassifier
 from pita.datasets.registry import get_dataset
 from pita.core.io import get_run_root, ensure_dir
 
@@ -45,8 +47,6 @@ class AlgorithmBase:
     ):
         raise NotImplementedError
 
-
-class ValueGuidedAlgorithms(AlgorithmBase):
     def _build_model(self, cfg: DictConfig, model_alias: str) -> HFModel:
         gen_cfg = GenerationConfig(
             max_new_tokens=int(cfg.common.max_new_tokens),
@@ -56,6 +56,9 @@ class ValueGuidedAlgorithms(AlgorithmBase):
             dtype=str(cfg.common.dtype),
         )
         return HFModel(model_alias, gen_cfg)
+
+
+class ValueGuidedAlgorithms(AlgorithmBase):
 
     def _build_dataset(self, cfg: DictConfig, dataset_name: str):
         ds_cfg = cfg.datasets[dataset_name]
@@ -80,7 +83,13 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         return None
 
     def generate_data(
-        self, cfg: DictConfig, ref_model: str, dataset: str, family: str, round_idx: int
+        self,
+        cfg: DictConfig,
+        ref_model: str,
+        dataset: str,
+        family: str,
+        round_idx: int,
+        cls_model: Optional[str] = None,
     ) -> None:
         run_root = get_run_root()
         ds_root = run_root / "datasets" / self.algo_key
@@ -93,14 +102,49 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         snap_csv = ds_root / f"{dataset}_{family_cap}_r{r}.csv"
 
         random.seed(int(cfg.collection.seed))
-        model = self._build_model(cfg, ref_model)
+        # Build generator model: round 1 uses ref-only, later rounds can use guided
+        ref_hf = self._build_model(cfg, ref_model)
+        if int(round_idx) > 0 and cls_model is not None:
+            # Load classifier from previous round if it exists and guide the ref model
+            family_cap = str(family).capitalize()
+            prev_r = int(round_idx)
+            ckpt_dir = (
+                run_root
+                / "models"
+                / self.algo_key
+                / f"{dataset}_{family_cap}_r{prev_r}"
+            )
+            guided_model: HFModel
+            if ckpt_dir.exists():
+                classifier = ValueClassifier(
+                    cls_model,
+                    tokenizer=ref_hf.tokenizer,
+                    device=ref_hf.model.device,
+                )
+                try:
+                    import torch as _torch
+
+                    state = _torch.load(
+                        str(ckpt_dir / "classifier.pt"),
+                        map_location=ref_hf.model.device,
+                    )
+                    classifier.load_state_dict(state)
+                except Exception:
+                    pass
+                guided = self.build_guided_with(cfg, ref=ref_hf, classifier=classifier)
+                model = guided
+            else:
+                model = ref_hf
+        else:
+            model = ref_hf
         ds = self._build_dataset(cfg, dataset)
+        self._dataset = ds
         gen_cfg = model.gen_cfg
 
         samples_per_example = int(cfg.collection.samples_per_example)
 
         records: List[Dict[str, Any]] = []
-        max_examples = int(cfg.collection.get("max_examples", 0) or 0)
+        max_examples = int(cfg.collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
         for ex in tqdm(
             islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
@@ -180,17 +224,33 @@ class ValueGuidedAlgorithms(AlgorithmBase):
     def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
         raise NotImplementedError
 
+    def _build_guided_model(
+        self,
+        cfg: DictConfig,
+        ref_model_alias: str,
+        cls_model_alias: str,
+    ) -> GuidedHFModel:
+        ref_model = self._build_model(cfg, ref_model_alias)
+        cls = ValueClassifier(
+            cls_model_alias,
+            tokenizer=ref_model.tokenizer,
+            device=ref_model.model.device,
+        )
+        g = cfg.common.guidance
+        return GuidedHFModel(ref_model, cls, g)
+
+    def build_guided_with(
+        self,
+        cfg: DictConfig,
+        *,
+        ref: HFModel,
+        classifier: ValueClassifier,
+    ) -> GuidedHFModel:
+        g = cfg.common.guidance
+        return GuidedHFModel(ref, classifier, g)
+
 
 class PostTrainingAlgorithms(AlgorithmBase):
-    def _build_model(self, cfg: DictConfig, model_alias: str) -> HFModel:
-        gen_cfg = GenerationConfig(
-            max_new_tokens=int(cfg.common.max_new_tokens),
-            temperature=float(cfg.common.temperature),
-            top_p=float(cfg.common.top_p),
-            use_chat_template=bool(cfg.common.use_chat_template),
-            dtype=str(cfg.common.dtype),
-        )
-        return HFModel(model_alias, gen_cfg)
 
     def _build_dataset(self, cfg: DictConfig, dataset_name: str):
         ds_cfg = cfg.datasets[dataset_name]
@@ -251,7 +311,7 @@ class PostTrainingAlgorithms(AlgorithmBase):
         samples_per_example = int(cfg.collection.samples_per_example)
 
         records: List[Dict[str, Any]] = []
-        max_examples = int(cfg.collection.get("max_examples", 0) or 0)
+        max_examples = int(cfg.collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
         for ex in tqdm(
             islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
@@ -335,7 +395,7 @@ class PostTrainingAlgorithms(AlgorithmBase):
         if ds is None:
             return {}
 
-        max_examples = int(cfg.collection.get("max_examples", 0) or 0)
+        max_examples = int(cfg.collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
 
         total = 0

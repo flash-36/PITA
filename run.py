@@ -32,10 +32,10 @@ def main(cfg: DictConfig) -> None:
         ref_model_alias, value_model_alias = resolve_family_pair(str(family))
         model_pairs.append((str(family), ref_model_alias, value_model_alias))
 
-    datasets = list(cfg.get("datasets", {}).keys())
+    datasets = list(cfg.datasets.keys())
     algo_registry = get_algorithm_registry()
 
-    rounds = int(cfg.get("rounds_of_training"))
+    rounds = int(cfg.rounds_of_training)
     for algo_key, algo_cfg in cfg.algos.items():
         algo_cls = algo_registry.get(algo_key)
         if algo_cls is None:
@@ -58,11 +58,14 @@ def main(cfg: DictConfig) -> None:
                         if round_idx > 0
                         else ckpt_dir
                     )
-                    gen_model = (
-                        str(prev_ckpt_dir)
-                        if (round_idx > 0 and prev_ckpt_dir.exists())
-                        else ref_model_alias
-                    )
+                    if algo_key == "Q#":
+                        gen_model = ref_model_alias
+                    else:
+                        gen_model = (
+                            str(prev_ckpt_dir)
+                            if (round_idx > 0 and prev_ckpt_dir.exists())
+                            else ref_model_alias
+                        )
                     ref_for_train = gen_model
 
                     logger.info(
@@ -76,6 +79,7 @@ def main(cfg: DictConfig) -> None:
                     algo.generate_data(
                         cfg=cfg,
                         ref_model=gen_model,
+                        cls_model=value_model_alias,
                         dataset=dataset_name,
                         family=family_name,
                         round_idx=round_idx,

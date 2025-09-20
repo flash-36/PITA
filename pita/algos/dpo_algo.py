@@ -7,7 +7,6 @@ from loguru import logger
 import os
 
 from pita.trainers import PreferencePairDataset, DPOTrainer
-from pita.models.hf import HFModel
 
 from pita.core.registry import register_algorithm
 from .base import PostTrainingAlgorithms
@@ -68,7 +67,7 @@ class DPOAlgorithm(PostTrainingAlgorithms):
             logger.warning("Failed to save model: %s", e)
 
         # Evaluate pass@1 and maj@8 on test split using the trained policy
-        eval_model = HFModel(str(ckpt_dir), policy.gen_cfg)
+        eval_model = self._build_model(cfg, str(ckpt_dir))
         eval_metrics = self.evaluate_pass1_maj8(
             cfg, eval_model, dataset, save_dir=output_dir
         )

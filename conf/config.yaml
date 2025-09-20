@@ -13,6 +13,11 @@ common:
   dtype: bfloat16
   use_chat_template: true
   bt_sampling: true
+  guidance:
+    eta: 1.0
+    mode: bernoulli
+    top_k: 20
+    use_cache: false
 
 # Number of iterative rounds: generate -> train -> regenerate -> train ...
 rounds_of_training: 2
@@ -27,17 +32,23 @@ collection:
 algos:
   # PITA:
   #   bt_beta: 1.0
-  # Q#: {}
-  # Q#HF: {}
-  DPO:
-    bt_beta: 1.0
-    beta: 0.1
+  Q#:
+    epochs: 3
+    batch_size: 8
+    num_workers: 2
     lr: 2.0e-5
     weight_decay: 0.0
-    epochs: 5
     grad_clip: 1.0
-    batch_size: 2
-    num_workers: 2
+  # Q#HF: {}
+  # DPO:
+  #   bt_beta: 1.0
+  #   beta: 0.1
+  #   lr: 2.0e-5
+  #   weight_decay: 0.0
+  #   epochs: 5
+  #   grad_clip: 1.0
+  #   batch_size: 2
+  #   num_workers: 2
   # RLHF:
   #   bt_beta: 1.0
   # BEST_OF_N: {}
