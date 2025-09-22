@@ -19,7 +19,6 @@ class ValueClassifierTrainer:
         lr: float,
         weight_decay: float,
         grad_clip: float | int | None,
-        dtype: str,
         pad_token_id: int,
     ) -> None:
         self.classifier = classifier
@@ -41,6 +40,8 @@ class ValueClassifierTrainer:
             shuffle=True,
             num_workers=self.num_workers,
             collate_fn=self._collate,
+            pin_memory=True,
+            persistent_workers=(self.num_workers > 0),
         )
 
     def _collate(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
@@ -62,9 +63,9 @@ class ValueClassifierTrainer:
             attention_mask.append(
                 torch.cat(
                     [
-                        torch.zeros(pad_len, dtype=torch.bool),
+                        torch.zeros(pad_len, dtype=torch.long),
                         torch.ones(
-                            len(x["input_ids"]) + len(x["target_ids"]), dtype=torch.bool
+                            len(x["input_ids"]) + len(x["target_ids"]), dtype=torch.long
                         ),
                     ]
                 )
@@ -72,8 +73,8 @@ class ValueClassifierTrainer:
             loss_mask.append(
                 torch.cat(
                     [
-                        torch.zeros(pad_len + len(x["input_ids"]), dtype=torch.bool),
-                        torch.ones(len(x["target_ids"]), dtype=torch.bool),
+                        torch.zeros(pad_len + len(x["input_ids"]), dtype=torch.long),
+                        torch.ones(len(x["target_ids"]), dtype=torch.long),
                     ]
                 )
             )
@@ -97,7 +98,7 @@ class ValueClassifierTrainer:
             for batch in batch_bar:
                 batch = {
                     k: (
-                        v.to(self.classifier.device)
+                        v.to(self.classifier.device, non_blocking=True)
                         if isinstance(v, torch.Tensor)
                         else v
                     )

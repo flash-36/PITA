@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers.generation.logits_process import LogitsProcessorList
 
-from .registry import resolve_model_id
+from pita.models.catalog import resolve_model_id
 from pita.core.prompts import build_instruction_prompt
 
 
@@ -17,6 +18,7 @@ class GenerationConfig:
     top_p: float = 0.9
     use_chat_template: bool = True
     dtype: str = "bfloat16"
+    attn_impl: str = "eager"
 
 
 class HFModel:
@@ -27,7 +29,6 @@ class HFModel:
             use_fast=True,
             trust_remote_code=True,
         )
-        added_special_tokens = False
         if getattr(self.tokenizer, "pad_token_id", None) is None:
             if getattr(self.tokenizer, "eos_token", None) is not None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -42,10 +43,13 @@ class HFModel:
         }.get(gen_cfg.dtype, torch.bfloat16)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            dtype=torch_dtype,
+            torch_dtype=torch_dtype,
             device_map="auto",
             trust_remote_code=True,
+            attn_implementation=gen_cfg.attn_impl,
+            low_cpu_mem_usage=True,
         )
+        self.model.eval()
         self.gen_cfg = gen_cfg
         self.eos_token_ids = self._compute_eos_token_ids()
         self.pad_token_id = self._compute_pad_token_id()
@@ -77,28 +81,73 @@ class HFModel:
         pad = getattr(self.tokenizer, "pad_token_id", None)
         if isinstance(pad, int):
             return pad
-        eos = getattr(self.tokenizer, "eos_token_id", None)
-        if isinstance(eos, list) and len(eos) > 0:
-            return eos[0]
-        return eos
+        raise ValueError("Pad token id not found")
+
+    def _gen_kwargs(
+        self,
+        *,
+        greedy: bool,
+        logits_processor: Optional[LogitsProcessorList],
+        max_new_tokens: Optional[int] = None,
+    ):
+        return {
+            "max_new_tokens": (
+                self.gen_cfg.max_new_tokens
+                if max_new_tokens is None
+                else int(max_new_tokens)
+            ),
+            "do_sample": (not greedy),
+            "temperature": (1.0 if greedy else self.gen_cfg.temperature),
+            "top_p": (1.0 if greedy else self.gen_cfg.top_p),
+            "pad_token_id": self.pad_token_id,
+            "eos_token_id": self.eos_token_ids,
+            "logits_processor": logits_processor,
+        }
 
     @torch.inference_mode()
-    def generate_text(self, prompt: str) -> str:
+    def generate_text(
+        self,
+        prompt: str,
+        *,
+        greedy: bool = False,
+        logits_processor: Optional[LogitsProcessorList] = None,
+    ) -> str:
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
         output = self.model.generate(
             **inputs,
-            max_new_tokens=self.gen_cfg.max_new_tokens,
-            do_sample=True,
-            temperature=self.gen_cfg.temperature,
-            top_p=self.gen_cfg.top_p,
-            pad_token_id=self.pad_token_id,
-            eos_token_id=self.eos_token_ids,
+            **self._gen_kwargs(greedy=greedy, logits_processor=logits_processor),
         )
         new_tokens = output[0][inputs["input_ids"].shape[1] :]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
     @torch.inference_mode()
-    def roll_in(self, full_prompt: str, max_roll_tokens: int) -> Dict[str, Any]:
+    def generate_n(
+        self,
+        prompt: str,
+        n: int,
+        *,
+        greedy: bool = False,
+        logits_processor: Optional[LogitsProcessorList] = None,
+    ) -> List[str]:
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        out = self.model.generate(
+            **inputs,
+            **self._gen_kwargs(greedy=greedy, logits_processor=logits_processor),
+            num_return_sequences=int(n),
+        )
+        seq_len = inputs["input_ids"].shape[1]
+        return [
+            self.tokenizer.decode(seq[seq_len:], skip_special_tokens=True).strip()
+            for seq in out
+        ]
+
+    @torch.inference_mode()
+    def roll_in(
+        self,
+        full_prompt: str,
+        max_roll_tokens: int,
+        logits_processor: Optional[LogitsProcessorList] = None,
+    ) -> Dict[str, Any]:
         """Greedy rollout for t steps to obtain context s_t.
 
         Returns dict with keys: prompt, context_ids, context_text.
@@ -111,12 +160,11 @@ class HFModel:
         ids = self.tokenizer(built, return_tensors="pt").to(self.model.device)
         out = self.model.generate(
             **ids,
-            max_new_tokens=max_roll_tokens,
-            do_sample=False,
-            temperature=1.0,
-            top_p=1.0,
-            pad_token_id=self.pad_token_id,
-            eos_token_id=self.eos_token_ids,
+            **self._gen_kwargs(
+                greedy=True,
+                logits_processor=logits_processor,
+                max_new_tokens=max_roll_tokens,
+            ),
         )
         context_tokens = out[0]
         context_text = self.tokenizer.decode(context_tokens, skip_special_tokens=True)
@@ -128,17 +176,20 @@ class HFModel:
 
     @torch.inference_mode()
     def continue_from_context(
-        self, context_text: str, max_new_tokens: int, greedy: bool
+        self,
+        context_text: str,
+        max_new_tokens: int,
+        greedy: bool,
+        logits_processor: Optional[LogitsProcessorList] = None,
     ) -> str:
         ids = self.tokenizer(context_text, return_tensors="pt").to(self.model.device)
         out = self.model.generate(
             **ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=not greedy,
-            temperature=self.gen_cfg.temperature if not greedy else 1.0,
-            top_p=self.gen_cfg.top_p if not greedy else 1.0,
-            pad_token_id=self.pad_token_id,
-            eos_token_id=self.eos_token_ids,
+            **self._gen_kwargs(
+                greedy=greedy,
+                logits_processor=logits_processor,
+                max_new_tokens=max_new_tokens,
+            ),
         )
         new_tokens = out[0][ids["input_ids"].shape[1] :]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()

@@ -3,31 +3,37 @@ from __future__ import annotations
 from typing import Any, Dict, Tuple
 from pathlib import Path
 
-from hydra.utils import get_original_cwd
-
 from pita.core.registry import register_algorithm
 from .base import ValueGuidedAlgorithms
 
 
-@register_algorithm("Q#HF")
+@register_algorithm("QSharpHF")
 class QSharpHFAlgorithm(ValueGuidedAlgorithms):
-    ALGO_KEY = "Q#HF"
+    ALGO_KEY = "QSharpHF"
 
-    def generate_data(self, cfg, ref_model: str, dataset: str, family: str) -> None:
-        orig_root = Path(get_original_cwd())
-        family_cap = str(family).capitalize()
-        pita_hf_dir = (
-            orig_root / "outputs" / "datasets" / "PITA" / f"{dataset}_{family_cap}.hf"
-        )
-        assert (
-            pita_hf_dir.exists()
-        ), f"Missing PITA dataset: {pita_hf_dir} to be used for Q#HF"
+    def generate_data(
+        self,
+        cfg,
+        ref_model: str,
+        dataset: str,
+        family: str,
+        round_idx: int,
+        cls_model: str | None = None,
+    ) -> None:
+        return None
 
     def run(
-        self, cfg, ref_model: str, cls_model: str, dataset: str, family: str, output_dir
+        self,
+        cfg,
+        ref_model: str,
+        cls_model: str,
+        dataset: str,
+        family: str,
+        output_dir,
+        round_idx: int,
     ) -> Dict[str, Any]:
         return {
-            "algo": "Q#HF",
+            "algo": "QSharpHF",
             "ref_model": ref_model,
             "cls_model": cls_model,
             "dataset": dataset,

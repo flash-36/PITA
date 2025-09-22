@@ -5,25 +5,45 @@ from typing import Dict, Any
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from loguru import logger
+from tqdm import tqdm
+import random
+import numpy as np
+import torch
 
 from pita.core.io import create_subdir, save_json, get_run_root
 from pita.core.registry import get_algorithm_registry
 import pita.algos  # trigger registration imports
 import pita.datasets  # trigger dataset registration
 from pita.plotting.hooks import plot_after_run
-from pita.models.registry import resolve_family_pair
+from pita.models.catalog import resolve_family_pair
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
-    logger.info("Loaded config:\n{}", OmegaConf.to_yaml(cfg, resolve=True))
+    run_root = get_run_root()
+    logger.add(
+        str(run_root / "run.log"),
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name}:{function}:{line} - {message}",
+        level="INFO",
+        enqueue=True,
+    )
+    logger.info("🧾 Loaded config:\n{}", OmegaConf.to_yaml(cfg, resolve=True))
 
     exp_name = cfg.experiment.name
     if exp_name in (None, "", "???"):
         raise ValueError("experiment.name must be set (non-empty)")
 
-    run_root = get_run_root()
-    logger.info("Run directory: {}", run_root)
+    # Global seeding for reproducibility
+    seed = int(cfg.experiment.seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    logger.info("📂 Run directory: {}", run_root)
 
     all_results: Dict[str, Any] = {}
 
@@ -44,48 +64,38 @@ def main(cfg: DictConfig) -> None:
 
         for family_name, ref_model_alias, value_model_alias in model_pairs:
             for dataset_name in datasets:
-                family_cap = str(family_name).capitalize()
-                ckpt_dir = (
-                    run_root / "models" / algo_key / f"{dataset_name}_{family_cap}"
-                )
-                for round_idx in range(rounds):
-                    logger.info("=== Round {}/{} ===", round_idx + 1, rounds)
-                    prev_ckpt_dir = (
-                        run_root
-                        / "models"
-                        / algo_key
-                        / f"{dataset_name}_{family_cap}_r{round_idx}"
-                        if round_idx > 0
-                        else ckpt_dir
+                for round_idx in tqdm(
+                    range(rounds),
+                    total=rounds,
+                    desc=f"{algo_key}:{dataset_name}:{family_name}",
+                ):
+                    logger.info("🔁 Round {}/{}", round_idx + 1, rounds)
+                    ref_for_train = algo.resolve_ref_for_round(
+                        run_root=run_root,
+                        dataset=dataset_name,
+                        family=family_name,
+                        ref_model_alias=ref_model_alias,
+                        round_idx=round_idx,
                     )
-                    if algo_key == "Q#":
-                        gen_model = ref_model_alias
-                    else:
-                        gen_model = (
-                            str(prev_ckpt_dir)
-                            if (round_idx > 0 and prev_ckpt_dir.exists())
-                            else ref_model_alias
-                        )
-                    ref_for_train = gen_model
 
                     logger.info(
-                        "Generating data (round {}) algo={} dataset={} gen_model={} cls={}",
+                        "🧪 Generating data (round {}) algo={} dataset={} gen_model={} cls={}",
                         round_idx + 1,
                         algo_key,
                         dataset_name,
-                        gen_model,
-                        value_model_alias,  # TODO for PITA like take care of this
+                        ref_for_train,
+                        value_model_alias,
                     )
                     algo.generate_data(
                         cfg=cfg,
-                        ref_model=gen_model,
+                        ref_model=ref_for_train,
                         cls_model=value_model_alias,
                         dataset=dataset_name,
                         family=family_name,
                         round_idx=round_idx,
                     )
                     logger.info(
-                        "Training (round {}) algo={} dataset={} ref_model={} cls={}",
+                        "🏋️ Training (round {}) algo={} dataset={} ref_model={} cls={}",
                         round_idx + 1,
                         algo_key,
                         dataset_name,
@@ -97,7 +107,7 @@ def main(cfg: DictConfig) -> None:
                         [
                             "results",
                             algo_key,
-                            f"{ref_model_alias}_vs_{value_model_alias}",
+                            f"{family_name}",
                             dataset_name,
                             f"r{round_idx + 1}",
                         ],
@@ -105,7 +115,7 @@ def main(cfg: DictConfig) -> None:
                     result = algo.run(
                         cfg=cfg,
                         ref_model=ref_for_train,
-                        cls_model=value_model_alias,  # TODO for PITA like take care of this
+                        cls_model=value_model_alias,
                         dataset=dataset_name,
                         family=family_name,
                         output_dir=out_dir,
@@ -113,13 +123,13 @@ def main(cfg: DictConfig) -> None:
                     )
                     save_json(out_dir / "result.json", result or {})
                     all_results.setdefault(algo_key, {}).setdefault(
-                        f"{ref_model_alias}_vs_{value_model_alias}", {}
-                    )[dataset_name] = result
+                        f"{family_name}", {}
+                    ).setdefault(dataset_name, {})[f"r{round_idx + 1}"] = result
 
     figs_dir = create_subdir(run_root, ["figures"])  # separate from raw results
     plot_after_run(cfg=cfg, results=all_results, output_dir=figs_dir)
 
-    logger.info("Done.")
+    logger.info("✅ Done.")
 
 
 if __name__ == "__main__":

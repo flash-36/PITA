@@ -13,11 +13,13 @@ common:
   dtype: bfloat16
   use_chat_template: true
   bt_sampling: true
+  bt_beta: 1.0
   guidance:
     eta: 1.0
     mode: bernoulli
     top_k: 20
     use_cache: false
+  attn_impl: eager
 
 # Number of iterative rounds: generate -> train -> regenerate -> train ...
 rounds_of_training: 2
@@ -32,23 +34,23 @@ collection:
 algos:
   # PITA:
   #   bt_beta: 1.0
-  Q#:
+  QSharp:
     epochs: 3
     batch_size: 8
     num_workers: 2
     lr: 2.0e-5
     weight_decay: 0.0
     grad_clip: 1.0
-  # Q#HF: {}
-  # DPO:
-  #   bt_beta: 1.0
-  #   beta: 0.1
-  #   lr: 2.0e-5
-  #   weight_decay: 0.0
-  #   epochs: 5
-  #   grad_clip: 1.0
-  #   batch_size: 2
-  #   num_workers: 2
+  # QSharpHF: {}
+  DPO:
+    bt_beta: 1.0
+    beta: 0.1
+    lr: 2.0e-5
+    weight_decay: 0.0
+    epochs: 5
+    grad_clip: 1.0
+    batch_size: 2
+    num_workers: 2
   # RLHF:
   #   bt_beta: 1.0
   # BEST_OF_N: {}
@@ -61,14 +63,14 @@ model_pairs:
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
 datasets:
-  # AIME:
-  #   train_hf_config: AIME2025-I
-  #   train_split: test
-  #   question_key: question
-  #   answer_key: answer
-  #   reward_model: weqweasdas/RM-Gemma-2B
-  #   test_hf_config: AIME2025-II
-  #   test_split: test
+  AIME:
+    train_hf_config: AIME2025-I
+    train_split: test
+    question_key: question
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: AIME2025-II
+    test_split: test
   GSM8K:
     train_hf_config: main
     train_split: train

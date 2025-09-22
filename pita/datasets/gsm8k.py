@@ -5,7 +5,7 @@ from typing import Iterable
 
 import re
 from datasets import load_dataset
-from .utils import extract_boxed_last, eq_math
+from .utils import extract_boxed_last, eq_math, extract_final_answer
 
 from .registry import register_dataset
 
@@ -46,5 +46,5 @@ class GSM8K:
             return m.group(1).strip() if m else a.strip()
 
         gold_clean = clean_gold(gold)
-        pred_clean = extract_boxed_last(pred_text)
+        pred_clean = extract_final_answer(pred_text)
         return eq_math(pred_clean, gold_clean)

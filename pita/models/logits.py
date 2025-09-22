@@ -8,7 +8,7 @@ from transformers import LogitsProcessor
 
 
 def _log1p_exp(x: torch.Tensor) -> torch.Tensor:
-    return torch.logaddexp(x, torch.tensor(0.0, device=x.device, dtype=x.dtype))
+    return F.softplus(x)
 
 
 class CustomValueGuidedLogitProcessor(LogitsProcessor):
@@ -77,7 +77,7 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
             self.classifier_state["input_ids"] = input_ids
             self.classifier_state["attention_mask"] = attention_mask
 
-        outputs = self.value_classifier(
+        outputs = self.value_classifier.score_candidates(
             input_ids=input_ids,
             attention_mask=self.classifier_state["attention_mask"],
             use_cache=self.classifier_state["use_cache"],
@@ -123,6 +123,9 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
                 atoms = atoms.to(log_pmfs.device)
             logit_offset = torch.logsumexp(log_pmfs + self.eta * atoms, dim=-1)
             logit_offset = logit_offset - logit_offset.min(dim=-1, keepdim=True).values
+            logit_offset = torch.nan_to_num(
+                logit_offset, nan=0.0, posinf=0.0, neginf=0.0
+            )
             return self._modify_top_k(scores, logit_offset, top_k_indices)
 
         classifier_logits = self._get_classifier_values(
@@ -132,10 +135,10 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
             if self.cd_baseline:
                 logit_offset = self.eta * torch.sigmoid(classifier_logits)
             else:
-                logit_offset = self.eta * torch.log(
-                    torch.sigmoid(classifier_logits)
-                    / (1 - torch.sigmoid(classifier_logits))
-                )
+                logit_offset = self.eta * classifier_logits
+            logit_offset = torch.nan_to_num(
+                logit_offset, nan=0.0, posinf=0.0, neginf=0.0
+            )
             return self._modify_top_k(scores, logit_offset, top_k_indices)
 
         if self.inference_mode == "bernoulli":
@@ -145,6 +148,9 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
                 log_numerator = _log1p_exp(self.eta + classifier_logits)
                 log_denominator = _log1p_exp(classifier_logits)
                 logit_offset = log_numerator - log_denominator
+            logit_offset = torch.nan_to_num(
+                logit_offset, nan=0.0, posinf=0.0, neginf=0.0
+            )
             return self._modify_top_k(scores, logit_offset, top_k_indices)
 
         return scores

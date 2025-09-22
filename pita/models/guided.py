@@ -1,19 +1,28 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
+from dataclasses import dataclass
 
 import torch
 from transformers.generation.logits_process import LogitsProcessorList
 
-from .hf import HFModel
-from .logits import CustomValueGuidedLogitProcessor
-from .value_classifier import ValueClassifier
+from pita.models.hf import HFModel
+from pita.models.logits import CustomValueGuidedLogitProcessor
+from pita.models.value_classifier import ValueClassifier
 from pita.core.prompts import build_instruction_prompt
+
+
+@dataclass
+class GuidanceConfig:
+    eta: float
+    mode: str
+    top_k: int
+    use_cache: bool
 
 
 class GuidedHFModel:
     def __init__(
-        self, ref: HFModel, classifier: ValueClassifier, guidance: Any
+        self, ref: HFModel, classifier: ValueClassifier, guidance: GuidanceConfig
     ) -> None:
         self.ref = ref
         self.classifier = classifier
@@ -24,93 +33,51 @@ class GuidedHFModel:
         self.pad_token_id = ref.pad_token_id
 
     @torch.inference_mode()
+    def _build_processor(self) -> LogitsProcessorList:
+        return LogitsProcessorList(
+            [
+                CustomValueGuidedLogitProcessor(
+                    eta=self.guidance.eta,
+                    ref_model=self.ref.model,
+                    ref_model_tokenizer=self.tokenizer,
+                    value_classifier=self.classifier,
+                    inference_mode=self.guidance.mode,
+                    top_k=self.guidance.top_k,
+                    use_cache=self.guidance.use_cache,
+                )
+            ]
+        )
+
+    @staticmethod
+    def _reset_state(proc: LogitsProcessorList) -> None:
+        for p in proc:
+            if hasattr(p, "reset_classifier_state"):
+                p.reset_classifier_state()
+
+    @torch.inference_mode()
     def generate_text(self, prompt: str) -> str:
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.ref.model.device)
-        proc = CustomValueGuidedLogitProcessor(
-            eta=self.guidance.eta,
-            ref_model=self.ref.model,
-            ref_model_tokenizer=self.tokenizer,
-            value_classifier=self.classifier,
-            inference_mode=self.guidance.mode,
-            top_k=self.guidance.top_k,
-            use_cache=self.guidance.use_cache,
-        )
-        proc.reset_classifier_state()
-        outputs = self.ref.model.generate(
-            **inputs,
-            logits_processor=LogitsProcessorList([proc]),
-            pad_token_id=self.pad_token_id,
-            max_new_tokens=self.gen_cfg.max_new_tokens,
-            do_sample=True,
-            temperature=self.gen_cfg.temperature,
-            top_p=self.gen_cfg.top_p,
-            eos_token_id=self.eos_token_ids,
-        )
-        new_tokens = outputs[0][inputs["input_ids"].shape[1] :]
-        return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        proc = self._build_processor()
+        self._reset_state(proc)
+        return self.ref.generate_text(prompt, logits_processor=proc)
+
+    @torch.inference_mode()
+    def generate_n(self, prompt: str, n: int, *, greedy: bool = False) -> List[str]:
+        proc = self._build_processor()
+        self._reset_state(proc)
+        return self.ref.generate_n(prompt, n, greedy=greedy, logits_processor=proc)
 
     @torch.inference_mode()
     def roll_in(self, full_prompt: str, max_roll_tokens: int) -> Dict[str, Any]:
-        built = build_instruction_prompt(
-            full_prompt,
-            tokenizer=self.tokenizer,
-            use_chat_template=self.gen_cfg.use_chat_template,
-        )
-        ids = self.tokenizer(built, return_tensors="pt").to(self.ref.model.device)
-        proc = CustomValueGuidedLogitProcessor(
-            eta=self.guidance.eta,
-            ref_model=self.ref.model,
-            ref_model_tokenizer=self.tokenizer,
-            value_classifier=self.classifier,
-            inference_mode=self.guidance.mode,
-            top_k=self.guidance.top_k,
-            use_cache=self.guidance.use_cache,
-        )
-        proc.reset_classifier_state()
-        out = self.ref.model.generate(
-            **ids,
-            logits_processor=LogitsProcessorList([proc]),
-            max_new_tokens=max_roll_tokens,
-            do_sample=False,
-            temperature=1.0,
-            top_p=1.0,
-            pad_token_id=self.pad_token_id,
-            eos_token_id=self.eos_token_ids,
-        )
-        context_tokens = out[0]
-        context_text = self.tokenizer.decode(context_tokens, skip_special_tokens=True)
-        return {
-            "prompt": built,
-            "context_ids": context_tokens,
-            "context_text": context_text,
-        }
+        proc = self._build_processor()
+        self._reset_state(proc)
+        return self.ref.roll_in(full_prompt, max_roll_tokens, logits_processor=proc)
 
     @torch.inference_mode()
     def continue_from_context(
         self, context_text: str, max_new_tokens: int, greedy: bool
     ) -> str:
-        ids = self.tokenizer(context_text, return_tensors="pt").to(
-            self.ref.model.device
+        proc = self._build_processor()
+        self._reset_state(proc)
+        return self.ref.continue_from_context(
+            context_text, max_new_tokens, greedy, logits_processor=proc
         )
-        proc = CustomValueGuidedLogitProcessor(
-            eta=self.guidance.eta,
-            ref_model=self.ref.model,
-            ref_model_tokenizer=self.tokenizer,
-            value_classifier=self.classifier,
-            inference_mode=self.guidance.mode,
-            top_k=self.guidance.top_k,
-            use_cache=self.guidance.use_cache,
-        )
-        proc.reset_classifier_state()
-        out = self.ref.model.generate(
-            **ids,
-            logits_processor=LogitsProcessorList([proc]),
-            max_new_tokens=max_new_tokens,
-            do_sample=not greedy,
-            temperature=self.gen_cfg.temperature if not greedy else 1.0,
-            top_p=self.gen_cfg.top_p if not greedy else 1.0,
-            pad_token_id=self.pad_token_id,
-            eos_token_id=self.eos_token_ids,
-        )
-        new_tokens = out[0][ids["input_ids"].shape[1] :]
-        return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()

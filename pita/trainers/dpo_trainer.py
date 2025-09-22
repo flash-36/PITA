@@ -78,11 +78,11 @@ class DPOTrainer(PairwiseTrainerBase):
             pol_rejected, batch["rejected_input_ids"], batch["rejected_response_mask"]
         )
 
-        # DPO loss: -log sigma(beta * (Δπ - Δref))
-        delta_ref = ref_lp_ch - ref_lp_rj
-        delta_pol = pol_lp_ch - pol_lp_rj
-        beta = self.cfg.beta
-        loss_vec = -torch.log(torch.sigmoid(beta * (delta_pol - delta_ref)))
+        # DPO loss (float32): softplus for numerical stability
+        delta_ref = (ref_lp_ch - ref_lp_rj).float()
+        delta_pol = (pol_lp_ch - pol_lp_rj).float()
+        beta = float(self.cfg.beta)
+        loss_vec = torch.nn.functional.softplus(-beta * (delta_pol - delta_ref))
         loss = loss_vec.mean()
 
         # Stats

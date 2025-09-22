@@ -1,25 +1,23 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple, Optional
-from collections import Counter
 from pathlib import Path
 import random
 from loguru import logger
 
 from omegaconf import DictConfig
-from datasets import Dataset, load_from_disk, concatenate_datasets
+from datasets import Dataset
 from tqdm import tqdm
 from itertools import islice
 import torch
-from transformers import AutoTokenizer, pipeline
-from pita.core.prompts import build_reward_model_prompt, build_instruction_prompt
-from pita.datasets.utils import extract_boxed_last
+from pita.core.prompts import build_instruction_prompt
 
 from pita.models.hf import HFModel, GenerationConfig
-from pita.models.guided import GuidedHFModel
+from pita.models.guided import GuidedHFModel, GuidanceConfig
 from pita.models.value_classifier import ValueClassifier
-from pita.datasets.registry import get_dataset
-from pita.core.io import get_run_root, ensure_dir
+from pita.datasets import build_train_dataset, build_test_dataset
+from pita.core.io import get_run_root, get_snapshot_paths, merge_and_save_hf
+from pita.models import RewardScorer
 
 
 class AlgorithmBase:
@@ -30,8 +28,48 @@ class AlgorithmBase:
     def algo_key(self) -> str:
         return self.ALGO_KEY
 
+    def family_cap(self, family: str) -> str:
+        return str(family).capitalize()
+
+    def get_prev_ckpt_dir(
+        self, run_root: Path, dataset: str, family: str, round_idx: int
+    ) -> Path:
+        family_cap = self.family_cap(family)
+        return (
+            run_root
+            / "models"
+            / self.algo_key
+            / f"{dataset}_{family_cap}_r{int(round_idx)}"
+        )
+
+    def resolve_ref_for_round(
+        self,
+        run_root: Path,
+        dataset: str,
+        family: str,
+        ref_model_alias: str,
+        round_idx: int,
+    ) -> str:
+        if int(round_idx) > 0:
+            prev_ckpt_dir = self.get_prev_ckpt_dir(run_root, dataset, family, round_idx)
+            if prev_ckpt_dir.exists():
+                return str(prev_ckpt_dir)
+        return ref_model_alias
+
+    def _build_dataset(self, cfg: DictConfig, dataset_name: str):
+        return build_train_dataset(cfg, dataset_name)
+
+    def _build_test_dataset(self, cfg: DictConfig, dataset_name: str):
+        return build_test_dataset(cfg, dataset_name)
+
     def generate_data(
-        self, cfg, ref_model: str, dataset: str, family: str, round_idx: int
+        self,
+        cfg,
+        ref_model: str,
+        dataset: str,
+        family: str,
+        round_idx: int,
+        cls_model: Optional[str] = None,
     ) -> None:
         return None
 
@@ -54,33 +92,42 @@ class AlgorithmBase:
             top_p=float(cfg.common.top_p),
             use_chat_template=bool(cfg.common.use_chat_template),
             dtype=str(cfg.common.dtype),
+            attn_impl=str(getattr(cfg.common, "attn_impl", "eager")),
         )
         return HFModel(model_alias, gen_cfg)
 
-
-class ValueGuidedAlgorithms(AlgorithmBase):
-
-    def _build_dataset(self, cfg: DictConfig, dataset_name: str):
-        ds_cfg = cfg.datasets[dataset_name]
-        ds_cls = get_dataset(dataset_name)
-        return ds_cls(
-            hf_config=str(ds_cfg.train_hf_config),
-            split=str(ds_cfg.train_split),
-            question_key=str(ds_cfg.question_key),
-            answer_key=str(ds_cfg.answer_key),
+    def get_ckpt_dir(
+        self, run_root: Path, dataset: str, family: str, round_idx: int
+    ) -> Path:
+        family_cap = self.family_cap(family)
+        return (
+            run_root
+            / "models"
+            / self.algo_key
+            / f"{dataset}_{family_cap}_r{int(round_idx)+1}"
         )
 
-    def _build_test_dataset(self, cfg: DictConfig, dataset_name: str):
-        ds_cfg = cfg.datasets[dataset_name]
-        if "test_hf_config" in ds_cfg and "test_split" in ds_cfg:
-            ds_cls = get_dataset(dataset_name)
-            return ds_cls(
-                hf_config=str(ds_cfg.test_hf_config),
-                split=str(ds_cfg.test_split),
-                question_key=str(ds_cfg.question_key),
-                answer_key=str(ds_cfg.answer_key),
-            )
-        return None
+
+class ValueGuidedAlgorithms(AlgorithmBase):
+    def maybe_load_classifier_from_prev_round(
+        self,
+        classifier: ValueClassifier,
+        *,
+        run_root: Path,
+        dataset: str,
+        family: str,
+        round_idx: int,
+        device: torch.device,
+    ) -> bool:
+        if int(round_idx) <= 0:
+            return False
+        prev_ckpt_dir = self.get_prev_ckpt_dir(run_root, dataset, family, round_idx)
+        ckpt = prev_ckpt_dir / "classifier.pt"
+        if ckpt.exists():
+            state = torch.load(str(ckpt), map_location=device)
+            classifier.load_state_dict(state)
+            return True
+        return False
 
     def generate_data(
         self,
@@ -91,48 +138,33 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         round_idx: int,
         cls_model: Optional[str] = None,
     ) -> None:
-        run_root = get_run_root()
-        ds_root = run_root / "datasets" / self.algo_key
-        ds_root.mkdir(parents=True, exist_ok=True)
-
-        family_cap = str(family).capitalize()
-        r = int(round_idx) + 1
-        snap_hf_prev = ds_root / f"{dataset}_{family_cap}_r{r-1}.hf" if r > 1 else None
-        snap_hf = ds_root / f"{dataset}_{family_cap}_r{r}.hf"
-        snap_csv = ds_root / f"{dataset}_{family_cap}_r{r}.csv"
+        snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
+            self.algo_key, dataset, family, round_idx
+        )
 
         random.seed(int(cfg.collection.seed))
         # Build generator model: round 1 uses ref-only, later rounds can use guided
         ref_hf = self._build_model(cfg, ref_model)
         if int(round_idx) > 0 and cls_model is not None:
-            # Load classifier from previous round if it exists and guide the ref model
-            family_cap = str(family).capitalize()
-            prev_r = int(round_idx)
-            ckpt_dir = (
-                run_root
-                / "models"
-                / self.algo_key
-                / f"{dataset}_{family_cap}_r{prev_r}"
+            ckpt_loaded = False
+            prev_classifier = ValueClassifier(
+                cls_model,
+                tokenizer=ref_hf.tokenizer,
+                device=ref_hf.model.device,
             )
-            guided_model: HFModel
-            if ckpt_dir.exists():
-                classifier = ValueClassifier(
-                    cls_model,
-                    tokenizer=ref_hf.tokenizer,
-                    device=ref_hf.model.device,
+            run_root = get_run_root()
+            ckpt_loaded = self.maybe_load_classifier_from_prev_round(
+                prev_classifier,
+                run_root=run_root,
+                dataset=dataset,
+                family=family,
+                round_idx=round_idx,
+                device=ref_hf.model.device,
+            )
+            if ckpt_loaded:
+                model = self.build_guided_with(
+                    cfg, ref=ref_hf, classifier=prev_classifier
                 )
-                try:
-                    import torch as _torch
-
-                    state = _torch.load(
-                        str(ckpt_dir / "classifier.pt"),
-                        map_location=ref_hf.model.device,
-                    )
-                    classifier.load_state_dict(state)
-                except Exception:
-                    pass
-                guided = self.build_guided_with(cfg, ref=ref_hf, classifier=classifier)
-                model = guided
             else:
                 model = ref_hf
         else:
@@ -160,7 +192,7 @@ class ValueGuidedAlgorithms(AlgorithmBase):
 
             if rollout_token_count < 2:
                 logger.info(
-                    "Skipping example due to short rollout: dataset=%s, family=%s, prompt_tokens=%d, rollout_tokens=%d",
+                    "Skipping example due to short rollout: dataset={} family={} prompt_tokens={} rollout_tokens={}",
                     dataset,
                     str(family),
                     prompt_token_count,
@@ -213,13 +245,7 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         if not records:
             return
         new_ds = Dataset.from_list(records)
-        if snap_hf_prev is not None and snap_hf_prev.exists():
-            old_ds = load_from_disk(str(snap_hf_prev))
-            merged = concatenate_datasets([old_ds, new_ds])
-        else:
-            merged = new_ds
-        merged.save_to_disk(str(snap_hf))
-        merged.to_csv(str(snap_csv))
+        merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
 
     def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
         raise NotImplementedError
@@ -236,7 +262,12 @@ class ValueGuidedAlgorithms(AlgorithmBase):
             tokenizer=ref_model.tokenizer,
             device=ref_model.model.device,
         )
-        g = cfg.common.guidance
+        g = GuidanceConfig(
+            eta=float(cfg.common.guidance.eta),
+            mode=str(cfg.common.guidance.mode),
+            top_k=int(cfg.common.guidance.top_k),
+            use_cache=bool(cfg.common.guidance.use_cache),
+        )
         return GuidedHFModel(ref_model, cls, g)
 
     def build_guided_with(
@@ -246,46 +277,29 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         ref: HFModel,
         classifier: ValueClassifier,
     ) -> GuidedHFModel:
-        g = cfg.common.guidance
+        g = GuidanceConfig(
+            eta=float(cfg.common.guidance.eta),
+            mode=str(cfg.common.guidance.mode),
+            top_k=int(cfg.common.guidance.top_k),
+            use_cache=bool(cfg.common.guidance.use_cache),
+        )
         return GuidedHFModel(ref, classifier, g)
 
 
 class PostTrainingAlgorithms(AlgorithmBase):
 
-    def _build_dataset(self, cfg: DictConfig, dataset_name: str):
-        ds_cfg = cfg.datasets[dataset_name]
-        ds_cls = get_dataset(dataset_name)
-        return ds_cls(
-            hf_config=str(ds_cfg.train_hf_config),
-            split=str(ds_cfg.train_split),
-            question_key=str(ds_cfg.question_key),
-            answer_key=str(ds_cfg.answer_key),
-        )
-
-    def _build_test_dataset(self, cfg: DictConfig, dataset_name: str):
-        ds_cfg = cfg.datasets[dataset_name]
-        if "test_hf_config" in ds_cfg and "test_split" in ds_cfg:
-            ds_cls = get_dataset(dataset_name)
-            return ds_cls(
-                hf_config=str(ds_cfg.test_hf_config),
-                split=str(ds_cfg.test_split),
-                question_key=str(ds_cfg.question_key),
-                answer_key=str(ds_cfg.answer_key),
-            )
-        return None
-
     def generate_data(
-        self, cfg: DictConfig, ref_model: str, dataset: str, family: str, round_idx: int
+        self,
+        cfg: DictConfig,
+        ref_model: str,
+        dataset: str,
+        family: str,
+        round_idx: int,
+        cls_model: Optional[str] = None,
     ) -> None:
-        run_root = get_run_root()
-        ds_root = run_root / "datasets" / self.algo_key
-        ds_root.mkdir(parents=True, exist_ok=True)
-
-        family_cap = str(family).capitalize()
-        r = int(round_idx) + 1
-        snap_hf_prev = ds_root / f"{dataset}_{family_cap}_r{r-1}.hf" if r > 1 else None
-        snap_hf = ds_root / f"{dataset}_{family_cap}_r{r}.hf"
-        snap_csv = ds_root / f"{dataset}_{family_cap}_r{r}.csv"
+        snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
+            self.algo_key, dataset, family, round_idx
+        )
 
         random.seed(int(cfg.collection.seed))
         model = self._build_model(cfg, ref_model)
@@ -296,16 +310,11 @@ class PostTrainingAlgorithms(AlgorithmBase):
         ds_cfg = cfg.datasets[dataset]
         rm_model = str(ds_cfg.reward_model)
         device = 0 if torch.cuda.is_available() else -1
-        self._bt_sampling = bool(cfg.common.bt_sampling)
-        self._rm_tokenizer = AutoTokenizer.from_pretrained(
-            rm_model, use_fast=True, trust_remote_code=True
-        )
-        self._rm_pipe = pipeline(
-            "text-classification",
-            model=rm_model,
-            tokenizer=self._rm_tokenizer,
+        self._reward = RewardScorer(
+            rm_model,
+            bt_sampling=bool(cfg.common.bt_sampling),
+            bt_beta=float(cfg.common.bt_beta),
             device=device,
-            model_kwargs={"torch_dtype": torch.bfloat16},
         )
 
         samples_per_example = int(cfg.collection.samples_per_example)
@@ -346,101 +355,10 @@ class PostTrainingAlgorithms(AlgorithmBase):
         if not records:
             return
         new_ds = Dataset.from_list(records)
-        if snap_hf_prev is not None and snap_hf_prev.exists():
-            old_ds = load_from_disk(str(snap_hf_prev))
-            merged = concatenate_datasets([old_ds, new_ds])
-        else:
-            merged = new_ds
-        merged.save_to_disk(str(snap_hf))
-        merged.to_csv(str(snap_csv))
+        merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
 
     def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
-        import math
-
-        rm_pipe = self._rm_pipe
-        rm_tok = self._rm_tokenizer
-
-        texts = build_reward_model_prompt(
-            question=ex.question, y_a=y_a, y_b=y_b, tokenizer=rm_tok
-        )
-
-        outs = rm_pipe(texts, top_k=None, function_to_apply="none", batch_size=2)
-        r_a = (
-            float(outs[0][0]["score"])
-            if isinstance(outs[0], list)
-            else float(outs[0]["score"])
-        )
-        r_b = (
-            float(outs[1][0]["score"])
-            if isinstance(outs[1], list)
-            else float(outs[1]["score"])
-        )
-
-        if self._bt_sampling:
-            beta = float(self.cfg.bt_beta)
-            p_a = 1.0 / (1.0 + math.exp(-beta * (r_a - r_b)))
-            preferred = 0 if random.random() < p_a else 1
-        else:
-            preferred = 0 if r_a >= r_b else 1
+        r_a, r_b, preferred = self._reward.score_pair(ex.question, y_a, y_b)
         return r_a, r_b, preferred
 
-    def evaluate_pass1_maj8(
-        self,
-        cfg: DictConfig,
-        model: HFModel,
-        dataset: str,
-        save_dir: Optional[Path] = None,
-    ) -> Dict[str, float]:
-        ds = self._build_test_dataset(cfg, dataset)
-        if ds is None:
-            return {}
-
-        max_examples = int(cfg.collection.max_examples or 0)
-        limit = max_examples if max_examples > 0 else len(ds)
-
-        total = 0
-        pass1 = 0
-        maj8 = 0
-        rows: List[Dict[str, str]] = []
-        for ex in tqdm(islice(ds.iter(), limit), total=limit, desc=f"Eval:{dataset}"):
-            prompt = ds.hydrate_prompt(ex.question)
-            built = build_instruction_prompt(
-                prompt,
-                tokenizer=model.tokenizer,
-                use_chat_template=model.gen_cfg.use_chat_template,
-            )
-            preds: List[str] = [model.generate_text(built) for _ in range(8)]
-
-            if ds.is_correct(ex.answer, preds[0]):
-                pass1 += 1
-
-            norm = [extract_boxed_last(p) for p in preds]
-            counts = Counter(norm)
-            if counts:
-                top_str, top_cnt = max(counts.items(), key=lambda kv: kv[1])
-                if list(counts.values()).count(top_cnt) == 1:
-                    rep_idx = norm.index(top_str)
-                    if ds.is_correct(ex.answer, preds[rep_idx]):
-                        maj8 += 1
-
-            total += 1
-
-            rows.append(
-                {
-                    "question": ex.question,
-                    "answer": ex.answer,
-                    **{f"pred_{i+1}": preds[i] for i in range(8)},
-                }
-            )
-
-        if save_dir is not None:
-            ensure_dir(Path(save_dir))
-            ds_out = Dataset.from_list(rows)
-            ds_out.save_to_disk(str(Path(save_dir) / "eval_predictions.hf"))
-            ds_out.to_csv(str(Path(save_dir) / "eval_predictions.csv"))
-
-        return {
-            "pass@1": float(pass1 / max(1, total)),
-            "maj@8": float(maj8 / max(1, total)),
-            "num_examples": int(total),
-        }
+    # Evaluation handled directly in algorithms

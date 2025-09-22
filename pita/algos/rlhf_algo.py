@@ -11,7 +11,14 @@ class RLHFAlgorithm(PostTrainingAlgorithms):
     ALGO_KEY = "RLHF"
 
     def run(
-        self, cfg, ref_model: str, cls_model: str, dataset: str, family: str, output_dir
+        self,
+        cfg,
+        ref_model: str,
+        cls_model: str,
+        dataset: str,
+        family: str,
+        output_dir,
+        round_idx: int,
     ) -> Dict[str, Any]:
         return {
             "algo": "RLHF",

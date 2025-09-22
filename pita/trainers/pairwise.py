@@ -1,46 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch.utils.data import Dataset as TorchDataset, DataLoader
 from transformers import PreTrainedTokenizerBase
 from pita.core.prompts import build_instruction_prompt
-from datasets import load_from_disk, Dataset
-
-
-@dataclass
-class PairExample:
-    prompt: str
-    chosen: str
-    rejected: str
-
-
-class PreferencePairDataset(TorchDataset):
-    """Loads the HF dataset saved by PostTrainingAlgorithms.generate_data and
-    exposes (prompt, chosen, rejected) pairs based on the 'preferred' field.
-    """
-
-    def __init__(self, hf_dir: Path):
-        self.hf_dir = Path(hf_dir)
-        self.ds: Dataset = load_from_disk(str(self.hf_dir))
-
-    def __len__(self) -> int:
-        return len(self.ds)
-
-    def __getitem__(self, idx: int) -> PairExample:
-        ex = self.ds[int(idx)]
-        prompt = str(ex["prompt"])  # strict
-        y_a = str(ex["y_a"])  # strict
-        y_b = str(ex["y_b"])  # strict
-        preferred = int(ex["preferred"])  # strict
-        if preferred == 0:
-            chosen, rejected = y_a, y_b
-        else:
-            chosen, rejected = y_b, y_a
-        return PairExample(prompt=prompt, chosen=chosen, rejected=rejected)
 
 
 class PairwiseTrainerBase:
@@ -66,9 +31,8 @@ class PairwiseTrainerBase:
         self.num_workers = int(num_workers)
         self.dtype_str = str(dtype)
 
-
     def _tokenize_batch(
-        self, batch: List[PairExample], max_length: Optional[int] = None
+        self, batch: List[Any], max_length: Optional[int] = None
     ) -> Dict[str, torch.Tensor]:
         # Build prompt+response sequences for chosen and rejected
         prompts = [
@@ -168,7 +132,7 @@ class PairwiseTrainerBase:
         logits: torch.Tensor, input_ids: torch.Tensor, response_mask: torch.Tensor
     ) -> torch.Tensor:
         # logits: [B, T, V], input_ids: [B, T], response_mask: [B, T]
-        logprobs = torch.log_softmax(logits[:, :-1, :], dim=-1)  # [B, T-1, V]
+        logprobs = torch.log_softmax(logits.float()[:, :-1, :], dim=-1)  # [B, T-1, V]
         target = input_ids[:, 1:]  # predict token t given t-1
         mask = response_mask[:, 1:].float()
 
@@ -185,4 +149,5 @@ class PairwiseTrainerBase:
             num_workers=self.num_workers,
             collate_fn=lambda batch: self._tokenize_batch(batch),
             pin_memory=True,
+            persistent_workers=(self.num_workers > 0),
         )

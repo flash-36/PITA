@@ -10,12 +10,27 @@ from .base import AlgorithmBase
 class BestOfNAlgorithm(AlgorithmBase):
     ALGO_KEY = "BEST_OF_N"
 
-    def generate_data(self, cfg, ref_model: str, dataset: str, family: str) -> None:
+    def generate_data(
+        self,
+        cfg,
+        ref_model: str,
+        dataset: str,
+        family: str,
+        round_idx: int,
+        cls_model: str | None = None,
+    ) -> None:
         # No data collection required for Best-of-N
         pass
 
     def run(
-        self, cfg, ref_model: str, cls_model: str, dataset: str, family: str, output_dir
+        self,
+        cfg,
+        ref_model: str,
+        cls_model: str,
+        dataset: str,
+        family: str,
+        output_dir,
+        round_idx: int,
     ) -> Dict[str, Any]:
         return {
             "algo": "BEST_OF_N",
