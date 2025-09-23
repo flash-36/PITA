@@ -11,7 +11,7 @@ from pita.core.registry import register_algorithm
 from .base import ValueGuidedAlgorithms
 from pita.eval.evaluate import evaluate_pass1_maj8
 from pita.core.io import get_run_root, get_snapshot_paths
-from pita.trainers import ValueClassifierTrainer
+from pita.trainers import QSharpTrainer
 from datasets import load_from_disk
 from pita.models.value_classifier import ValueClassifier
 from pita.core.prompts import build_instruction_prompt
@@ -65,7 +65,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
             device=ref.model.device,
         )
 
-        trainer = ValueClassifierTrainer(
+        trainer = QSharpTrainer(
             classifier=classifier,
             tokenizer=ref.tokenizer,
             batch_size=int(self.cfg.batch_size),

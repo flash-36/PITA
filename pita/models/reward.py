@@ -18,6 +18,7 @@ class RewardScorer:
         bt_beta: float,
         device: int | str | torch.device,
     ) -> None:
+        self._model_id = str(model_id)
         self._bt_sampling = bool(bt_sampling)
         self._bt_beta = float(bt_beta)
         self._tokenizer = AutoTokenizer.from_pretrained(
@@ -39,20 +40,26 @@ class RewardScorer:
         return self._tokenizer
 
     def score_pair(self, question: str, y_a: str, y_b: str) -> Tuple[float, float, int]:
-        texts = build_reward_model_prompt(
-            question=question, y_a=y_a, y_b=y_b, tokenizer=self._tokenizer
-        )
-        outs = self._pipe(texts, top_k=None, function_to_apply="none", batch_size=2)
-        r_a = (
-            float(outs[0][0]["score"])
-            if isinstance(outs[0], list)
-            else float(outs[0]["score"])
-        )
-        r_b = (
-            float(outs[1][0]["score"])
-            if isinstance(outs[1], list)
-            else float(outs[1]["score"])
-        )
+        if "distilbert-imdb" in self._model_id:
+            texts = [y_a, y_b]
+            outs = self._pipe(texts, top_k=None, function_to_apply="none", batch_size=2)
+            r_a = [d for d in outs[0] if d["label"] == "POSITIVE"][0]["score"]
+            r_b = [d for d in outs[1] if d["label"] == "POSITIVE"][0]["score"]
+        else:
+            texts = build_reward_model_prompt(
+                question=question, y_a=y_a, y_b=y_b, tokenizer=self._tokenizer
+            )
+            outs = self._pipe(texts, top_k=None, function_to_apply="none", batch_size=2)
+            r_a = (
+                float(outs[0][0]["score"])
+                if isinstance(outs[0], list)
+                else float(outs[0]["score"])
+            )
+            r_b = (
+                float(outs[1][0]["score"])
+                if isinstance(outs[1], list)
+                else float(outs[1]["score"])
+            )
         if self._bt_sampling:
             beta = self._bt_beta
             p_a = 1.0 / (1.0 + math.exp(-beta * (r_a - r_b)))

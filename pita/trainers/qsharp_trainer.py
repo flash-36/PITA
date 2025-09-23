@@ -8,7 +8,7 @@ from torch.optim import AdamW
 from tqdm import tqdm
 
 
-class ValueClassifierTrainer:
+class QSharpTrainer:
     def __init__(
         self,
         classifier,

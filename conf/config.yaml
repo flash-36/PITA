@@ -28,12 +28,17 @@ rounds_of_training: 2
 collection:
   samples_per_example: 4
   seed: 47
-  max_examples: 1
+  max_examples: 10
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
-  # PITA:
-  #   bt_beta: 1.0
+  PITA:
+    epochs: 3
+    batch_size: 8
+    num_workers: 2
+    lr: 2.0e-5
+    weight_decay: 0.0
+    grad_clip: 1.0
   QSharp:
     epochs: 3
     batch_size: 8
@@ -78,6 +83,22 @@ datasets:
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
     test_hf_config: main
+    test_split: test
+  TLDR:
+    train_hf_config: ""
+    train_split: train
+    question_key: prompt
+    answer_key: completion
+    reward_model: OpenAssistant/reward-model-deberta-v3-large-v2
+    test_hf_config: ""
+    test_split: test
+  IMDBGen:
+    train_hf_config: ""
+    train_split: train
+    question_key: text
+    answer_key: label
+    reward_model: lvwerra/distilbert-imdb
+    test_hf_config: ""
     test_split: test
   # MATH:
   #   train_hf_config: ""
