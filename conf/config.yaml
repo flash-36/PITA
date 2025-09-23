@@ -33,48 +33,48 @@ collection:
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
-  # PITA:
-  #   epochs: 3
-  #   batch_size: 8
-  #   num_workers: 2
-  #   lr: 2.0e-5
-  #   weight_decay: 0.0
-  #   grad_clip: 1.0
-  #   loss_type: bce
-  #   num_atoms: 11
-  #   V_min: 0.0
-  #   V_max: 1.0
-  #   guidance:
-  #     eta: 1.0
-  #     mode: expectation
-  #     top_k: 20
-  #     use_cache: false
-  # QSharp:
-  #   epochs: 3
-  #   batch_size: 8
-  #   num_workers: 2
-  #   lr: 2.0e-5
-  #   weight_decay: 0.0
-  #   grad_clip: 1.0
-  #   loss_type: bce
-  #   num_atoms: 11
-  #   V_min: 0.0
-  #   V_max: 1.0
-  #   guidance:
-  #     eta: 1.0
-  #     mode: bernoulli
-  #     top_k: 20
-  #     use_cache: false
-  # QSharpHF: {}
-  DPO:
-    bt_beta: 1.0
-    beta: 0.1
-    lr: 2.0e-5
-    weight_decay: 0.0
-    epochs: 5
-    grad_clip: 1.0
+  PITA:
+    epochs: 3
     batch_size: 8
     num_workers: 2
+    lr: 2.0e-5
+    weight_decay: 0.0
+    grad_clip: 1.0
+    loss_type: bce
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
+    guidance:
+      eta: 1.0
+      mode: expectation
+      top_k: 20
+      use_cache: false
+  QSharp:
+    epochs: 3
+    batch_size: 8
+    num_workers: 2
+    lr: 2.0e-5
+    weight_decay: 0.0
+    grad_clip: 1.0
+    loss_type: bce
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
+    guidance:
+      eta: 1.0
+      mode: bernoulli
+      top_k: 20
+      use_cache: false
+  # QSharpHF: {}
+  # DPO:
+  #   bt_beta: 1.0
+  #   beta: 0.1
+  #   lr: 2.0e-5
+  #   weight_decay: 0.0
+  #   epochs: 5
+  #   grad_clip: 1.0
+  #   batch_size: 8
+  #   num_workers: 2
   # RLHF:
   #   bt_beta: 1.0
   # BEST_OF_N: {}
@@ -83,7 +83,7 @@ algos:
 model_pairs:
   - gemma
   - llama
-  # - gpt
+  - gpt
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
 datasets:
