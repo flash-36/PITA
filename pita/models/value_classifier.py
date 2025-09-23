@@ -18,20 +18,38 @@ class ValueClassifier(nn.Module):
         tokenizer: Any,
         device: Optional[Union[str, torch.device]] = None,
         *,
-        loss_type: str = "bce",
-        num_atoms: int = 11,
-        V_min: float = 0.0,
-        V_max: float = 1.0,
+        loss_type: str,
+        num_atoms: int,
+        V_min: float,
+        V_max: float,
+        attn_impl: str,
+        dtype: str | None,
+        gradient_checkpointing: bool,
     ) -> None:
         super().__init__()
         assert loss_type in ("bce", "mse", "mle")
         self.tokenizer = tokenizer
         model_id = resolve_model_id(name_or_id)
+        torch_dtype = None
+        if dtype:
+            torch_dtype = {
+                "bfloat16": torch.bfloat16,
+                "float16": torch.float16,
+                "fp16": torch.float16,
+                "float32": torch.float32,
+                "fp32": torch.float32,
+            }.get(str(dtype), None)
         self.backbone = AutoModelForCausalLM.from_pretrained(
-            model_id, trust_remote_code=True, attn_implementation="eager"
+            model_id,
+            trust_remote_code=True,
+            attn_implementation=attn_impl,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
         )
         if device is not None:
             self.backbone = self.backbone.to(device)
+        if gradient_checkpointing:
+            self.backbone.gradient_checkpointing_enable()
 
         self.loss_type = loss_type
         hidden_size = int(getattr(self.backbone.config, "hidden_size"))
@@ -44,8 +62,11 @@ class ValueClassifier(nn.Module):
 
         out_dim = 1 if self.loss_type != "mle" else self.num_atoms
         self.score = nn.Linear(hidden_size, out_dim, bias=True)
+        backbone_dtype = next(self.backbone.parameters()).dtype
         if device is not None:
-            self.score = self.score.to(device)
+            self.score = self.score.to(device=device, dtype=backbone_dtype)
+        else:
+            self.score = self.score.to(dtype=backbone_dtype)
 
     @property
     def device(self) -> torch.device:

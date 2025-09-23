@@ -14,12 +14,12 @@ common:
   use_chat_template: true
   bt_sampling: true
   bt_beta: 1.0
-  guidance:
-    eta: 1.0
-    mode: bernoulli
-    top_k: 20
-    use_cache: false
   attn_impl: eager
+  amp_dtype: bfloat16
+  micro_batch_size: 0
+  clear_cache_interval: 0
+  gradient_checkpointing: false
+  gen_batch_size: 8
 
 # Number of iterative rounds: generate -> train -> regenerate -> train ...
 rounds_of_training: 2
@@ -28,24 +28,43 @@ rounds_of_training: 2
 collection:
   samples_per_example: 4
   seed: 47
-  max_examples: 10
+  max_examples: 16
+  reward_batch_size: 2
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
-  PITA:
-    epochs: 3
-    batch_size: 8
-    num_workers: 2
-    lr: 2.0e-5
-    weight_decay: 0.0
-    grad_clip: 1.0
-  QSharp:
-    epochs: 3
-    batch_size: 8
-    num_workers: 2
-    lr: 2.0e-5
-    weight_decay: 0.0
-    grad_clip: 1.0
+  # PITA:
+  #   epochs: 3
+  #   batch_size: 8
+  #   num_workers: 2
+  #   lr: 2.0e-5
+  #   weight_decay: 0.0
+  #   grad_clip: 1.0
+  #   loss_type: bce
+  #   num_atoms: 11
+  #   V_min: 0.0
+  #   V_max: 1.0
+  #   guidance:
+  #     eta: 1.0
+  #     mode: expectation
+  #     top_k: 20
+  #     use_cache: false
+  # QSharp:
+  #   epochs: 3
+  #   batch_size: 8
+  #   num_workers: 2
+  #   lr: 2.0e-5
+  #   weight_decay: 0.0
+  #   grad_clip: 1.0
+  #   loss_type: bce
+  #   num_atoms: 11
+  #   V_min: 0.0
+  #   V_max: 1.0
+  #   guidance:
+  #     eta: 1.0
+  #     mode: bernoulli
+  #     top_k: 20
+  #     use_cache: false
   # QSharpHF: {}
   DPO:
     bt_beta: 1.0
@@ -54,7 +73,7 @@ algos:
     weight_decay: 0.0
     epochs: 5
     grad_clip: 1.0
-    batch_size: 2
+    batch_size: 8
     num_workers: 2
   # RLHF:
   #   bt_beta: 1.0
@@ -62,9 +81,9 @@ algos:
 
 # Model pairs; map of ref -> classifier
 model_pairs:
-  # - gemma
-  # - llama
-  - gpt
+  - gemma
+  - llama
+  # - gpt
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
 datasets:

@@ -92,7 +92,8 @@ class AlgorithmBase:
             top_p=float(cfg.common.top_p),
             use_chat_template=bool(cfg.common.use_chat_template),
             dtype=str(cfg.common.dtype),
-            attn_impl=str(getattr(cfg.common, "attn_impl", "eager")),
+            attn_impl=str(cfg.common.attn_impl),
+            gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
         )
         return HFModel(model_alias, gen_cfg)
 
@@ -151,6 +152,12 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                 cls_model,
                 tokenizer=ref_hf.tokenizer,
                 device=ref_hf.model.device,
+                loss_type=str(self.cfg.loss_type),
+                num_atoms=int(self.cfg.num_atoms),
+                V_min=float(self.cfg.V_min),
+                V_max=float(self.cfg.V_max),
+                attn_impl=str(cfg.common.attn_impl),
+                dtype=str(cfg.common.amp_dtype),
             )
             run_root = get_run_root()
             ckpt_loaded = self.maybe_load_classifier_from_prev_round(
@@ -178,70 +185,86 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         records: List[Dict[str, Any]] = []
         max_examples = int(cfg.collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
-        for ex in tqdm(
-            islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
-        ):
-            prompt = ds.hydrate_prompt(ex.question)
-            rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
+        gb = int(cfg.common.gen_batch_size)
+        it = islice(ds.iter(), limit)
+        pbar = tqdm(total=limit, desc=f"{self.algo_key}:{dataset}:{family}")
+        while True:
+            chunk = list(islice(it, gb))
+            if not chunk:
+                break
+            prompts = [ds.hydrate_prompt(ex.question) for ex in chunk]
+            rollouts = model.roll_in_batch(
+                prompts, max_roll_tokens=gen_cfg.max_new_tokens
+            )
 
-            built_prompt = rollout["prompt"]
-            prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
-            context_token_ids = rollout["context_ids"].tolist()
-            full_token_count = len(context_token_ids)
-            rollout_token_count = full_token_count - prompt_token_count
-
-            if rollout_token_count < 2:
-                logger.info(
-                    "Skipping example due to short rollout: dataset={} family={} prompt_tokens={} rollout_tokens={}",
-                    dataset,
-                    str(family),
-                    prompt_token_count,
-                    rollout_token_count,
+            # Group by remaining token budget to batch continuations
+            budget_to_items: Dict[int, List[Tuple[Any, str, str, str]]] = {}
+            for ex, prompt, rollout in zip(chunk, prompts, rollouts):
+                built_prompt = rollout["prompt"]
+                context_token_ids = rollout["context_ids"].tolist()
+                full_token_count = len(context_token_ids)
+                padded_in_len = int(
+                    rollout.get(
+                        "padded_in_len", len(model.tokenizer(built_prompt)["input_ids"])
+                    )
                 )
-                continue
+                rollout_token_count = full_token_count - padded_in_len
+                if rollout_token_count < 2:
+                    continue
+                for _ in range(samples_per_example):
+                    cutoff_tokens = random.randint(1, rollout_token_count - 1)
+                    context_prefix_ids = context_token_ids[
+                        : padded_in_len + cutoff_tokens
+                    ]
+                    context_text = model.tokenizer.decode(
+                        context_prefix_ids, skip_special_tokens=True
+                    )
+                    solution_prefix_ids = context_prefix_ids[padded_in_len:]
+                    solution_prefix_text = model.tokenizer.decode(
+                        solution_prefix_ids, skip_special_tokens=True
+                    )
+                    remaining = int(gen_cfg.max_new_tokens - cutoff_tokens)
+                    budget_to_items.setdefault(remaining, []).append(
+                        (ex, prompt, solution_prefix_text, context_text)
+                    )
 
-            for _ in range(samples_per_example):
-                cutoff_tokens = random.randint(1, rollout_token_count - 1)
-
-                context_prefix_ids = context_token_ids[
-                    : prompt_token_count + cutoff_tokens
-                ]
-                context_text = model.tokenizer.decode(
-                    context_prefix_ids, skip_special_tokens=True
+            total_items = sum(len(v) for v in budget_to_items.values())
+            cont_bar = tqdm(
+                total=total_items, desc=f"{self.algo_key}:{dataset}:cont", leave=False
+            )
+            for remaining, items in budget_to_items.items():
+                contexts = [ctx for (_, _, _, ctx) in items]
+                y_refs = model.continue_from_context_batch(
+                    contexts, max_new_tokens=remaining, greedy=True
                 )
-                solution_prefix_ids = context_prefix_ids[prompt_token_count:]
-                solution_prefix_text = model.tokenizer.decode(
-                    solution_prefix_ids, skip_special_tokens=True
+                y_samps = model.continue_from_context_batch(
+                    contexts, max_new_tokens=remaining, greedy=False
                 )
+                for (ex, prompt, sol_prefix, _), y_ref, y_sample in zip(
+                    items, y_refs, y_samps
+                ):
+                    y_a = sol_prefix + y_ref
+                    y_b = sol_prefix + y_sample
+                    score_a, score_b, preferred = self.score_samples(ex, y_a, y_b)
+                    records.append(
+                        {
+                            "question": ex.question,
+                            "answer": ex.answer,
+                            "prompt": prompt,
+                            "t": None,
+                            "context": prompt + sol_prefix,
+                            "y_a": y_a,
+                            "y_b": y_b,
+                            "score_a": score_a,
+                            "score_b": score_b,
+                            "preferred": preferred,
+                        }
+                    )
+                cont_bar.update(len(items))
+            cont_bar.close()
+            pbar.update(len(chunk))
 
-                remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
-                y_ref = model.continue_from_context(
-                    context_text, max_new_tokens=remaining_token_budget, greedy=True
-                )
-                y_sample = model.continue_from_context(
-                    context_text, max_new_tokens=remaining_token_budget, greedy=False
-                )
-
-                y_a = solution_prefix_text + y_ref
-                y_b = solution_prefix_text + y_sample
-
-                score_a, score_b, preferred = self.score_samples(ex, y_a, y_b)
-
-                records.append(
-                    {
-                        "question": ex.question,
-                        "answer": ex.answer,
-                        "prompt": prompt,
-                        "t": cutoff_tokens,
-                        "context": prompt + solution_prefix_text,
-                        "y_a": y_a,
-                        "y_b": y_b,
-                        "score_a": score_a,
-                        "score_b": score_b,
-                        "preferred": preferred,
-                    }
-                )
-
+        pbar.close()
         if not records:
             return
         new_ds = Dataset.from_list(records)
@@ -263,10 +286,10 @@ class ValueGuidedAlgorithms(AlgorithmBase):
             device=ref_model.model.device,
         )
         g = GuidanceConfig(
-            eta=float(cfg.common.guidance.eta),
-            mode=str(cfg.common.guidance.mode),
-            top_k=int(cfg.common.guidance.top_k),
-            use_cache=bool(cfg.common.guidance.use_cache),
+            eta=float(self.cfg.guidance.eta),
+            mode=str(self.cfg.guidance.mode),
+            top_k=int(self.cfg.guidance.top_k),
+            use_cache=bool(self.cfg.guidance.use_cache),
         )
         return GuidedHFModel(ref_model, cls, g)
 
@@ -278,10 +301,10 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         classifier: ValueClassifier,
     ) -> GuidedHFModel:
         g = GuidanceConfig(
-            eta=float(cfg.common.guidance.eta),
-            mode=str(cfg.common.guidance.mode),
-            top_k=int(cfg.common.guidance.top_k),
-            use_cache=bool(cfg.common.guidance.use_cache),
+            eta=float(self.cfg.guidance.eta),
+            mode=str(self.cfg.guidance.mode),
+            top_k=int(self.cfg.guidance.top_k),
+            use_cache=bool(self.cfg.guidance.use_cache),
         )
         return GuidedHFModel(ref, classifier, g)
 
@@ -315,6 +338,8 @@ class PostTrainingAlgorithms(AlgorithmBase):
             bt_sampling=bool(cfg.common.bt_sampling),
             bt_beta=float(cfg.common.bt_beta),
             device=device,
+            dtype=str(cfg.common.dtype),
+            batch_size=int(cfg.collection.reward_batch_size),
         )
 
         samples_per_example = int(cfg.collection.samples_per_example)

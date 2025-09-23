@@ -18,13 +18,13 @@ class PairwiseTrainerBase:
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
-        use_chat_template: bool = True,
-        dtype: str = None,
-        batch_size: int = 2,
-        num_workers: int = 2,
+        use_chat_template: bool,
+        dtype: str,
+        batch_size: int,
+        num_workers: int,
     ) -> None:
         self.tokenizer: PreTrainedTokenizerBase = tokenizer
-        self.tokenizer.padding_side = "left"  # more memory efficient for causal LM
+        self.tokenizer.padding_side = "left"
 
         self.use_chat_template = bool(use_chat_template)
         self.batch_size = int(batch_size)

@@ -36,6 +36,8 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             bt_sampling=bool(cfg.common.bt_sampling),
             bt_beta=float(cfg.common.bt_beta),
             device=device,
+            dtype=str(cfg.common.dtype),
+            batch_size=int(cfg.collection.reward_batch_size),
         )
         return super().generate_data(
             cfg=cfg,
@@ -79,6 +81,13 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             cls_model,
             tokenizer=ref.tokenizer,
             device=ref.model.device,
+            loss_type=str(self.cfg.loss_type),
+            num_atoms=int(self.cfg.num_atoms),
+            V_min=float(self.cfg.V_min),
+            V_max=float(self.cfg.V_max),
+            attn_impl=str(cfg.common.attn_impl),
+            dtype=str(cfg.common.amp_dtype),
+            gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
         )
         self.maybe_load_classifier_from_prev_round(
             classifier,
@@ -98,6 +107,9 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             weight_decay=float(self.cfg.weight_decay),
             grad_clip=float(self.cfg.grad_clip),
             pad_token_id=ref.pad_token_id,
+            micro_batch_size=int(cfg.common.micro_batch_size),
+            amp_dtype=str(cfg.common.amp_dtype),
+            clear_cache_interval=int(cfg.common.clear_cache_interval),
         )
         sample = ds[0] if len(ds) > 0 else None
         need_convert = sample is not None and not all(
@@ -122,6 +134,13 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             cls_model,
             tokenizer=ref.tokenizer,
             device=ref.model.device,
+            loss_type=str(self.cfg.loss_type),
+            num_atoms=int(self.cfg.num_atoms),
+            V_min=float(self.cfg.V_min),
+            V_max=float(self.cfg.V_max),
+            attn_impl=str(cfg.common.attn_impl),
+            dtype=str(cfg.common.amp_dtype),
+            gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
         )
         state = torch.load(
             str(ckpt_dir / "classifier.pt"), map_location=ref.model.device

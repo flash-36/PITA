@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm
+from torch.amp import autocast, GradScaler
 
 
 class PITATrainer:
@@ -20,6 +21,9 @@ class PITATrainer:
         weight_decay: float,
         grad_clip: float | int | None,
         pad_token_id: int,
+        micro_batch_size: int,
+        amp_dtype: str,
+        clear_cache_interval: int,
     ) -> None:
         self.classifier = classifier
         self.tokenizer = tokenizer
@@ -32,6 +36,24 @@ class PITATrainer:
         )
         self.grad_clip = float(grad_clip) if grad_clip else 0.0
         self.pad_token_id = int(pad_token_id)
+        self.micro_batch_size = int(micro_batch_size)
+        dtype_map = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "fp16": torch.float16,
+            "float32": torch.float32,
+            "fp32": torch.float32,
+        }
+        self.amp_dtype = dtype_map[str(amp_dtype)]
+        self.autocast_enabled = torch.cuda.is_available() and self.amp_dtype in (
+            torch.bfloat16,
+            torch.float16,
+        )
+        self.scaler = GradScaler(
+            device="cuda",
+            enabled=self.autocast_enabled and self.amp_dtype == torch.float16,
+        )
+        self.clear_cache_interval = int(clear_cache_interval)
 
     def create_loader(self, ds) -> DataLoader:
         return DataLoader(
@@ -171,26 +193,53 @@ class PITATrainer:
                     dim=0,
                 )
                 loss_weights = torch.ones_like(labels)
-                outputs = self.classifier(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                    loss_mask=loss_mask,
-                    loss_weights=loss_weights,
-                    return_dict=True,
+                total_bs = input_ids.size(0)
+                micro_bs = (
+                    self.micro_batch_size if self.micro_batch_size > 0 else total_bs
                 )
-                loss = outputs.loss
-                loss.backward()
+                last_loss_val = 0.0
+                for start in range(0, total_bs, micro_bs):
+                    end = min(start + micro_bs, total_bs)
+                    mb_slice = slice(start, end)
+                    scale = (end - start) / max(1, total_bs)
+                    with autocast(
+                        device_type="cuda",
+                        dtype=self.amp_dtype,
+                        enabled=self.autocast_enabled,
+                    ):
+                        outputs = self.classifier(
+                            input_ids=input_ids[mb_slice],
+                            attention_mask=attention_mask[mb_slice],
+                            labels=labels[mb_slice],
+                            loss_mask=loss_mask[mb_slice],
+                            loss_weights=loss_weights[mb_slice],
+                            return_dict=True,
+                            use_cache=False,
+                        )
+                        loss = outputs.loss * scale
+                    if self.scaler.is_enabled():
+                        self.scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
+                    last_loss_val = float(loss.detach().item()) / max(scale, 1e-8)
                 if self.grad_clip and self.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(
                         self.classifier.parameters(), self.grad_clip
                     )
-                self.optimizer.step()
+                if self.scaler.is_enabled():
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none=True)
 
                 steps += 1
-                accum_loss += float(loss.item())
-                batch_bar.set_postfix(loss=float(loss.item()))
+                accum_loss += float(last_loss_val)
+                batch_bar.set_postfix(loss=float(last_loss_val))
+                if self.clear_cache_interval > 0 and (
+                    steps % self.clear_cache_interval == 0
+                ):
+                    torch.cuda.empty_cache()
             avg_loss = accum_loss / max(1, steps)
             epoch_bar.set_postfix(avg_loss=f"{avg_loss:.4f}")
         return {"loss": accum_loss / max(1, steps), "steps": steps}

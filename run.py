@@ -42,6 +42,8 @@ def main(cfg: DictConfig) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
 
     logger.info("📂 Run directory: {}", run_root)
 

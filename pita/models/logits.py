@@ -21,15 +21,13 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
         value_classifier: Any,
         inference_mode: str,
         top_k: int,
-        use_cache: bool = True,
-        cd_baseline: int = 0,
+        use_cache: bool,
     ) -> None:
         self.eta = float(eta)
         self.ref_model = ref_model
         self.ref_model_tokenizer = ref_model_tokenizer
         self.inference_mode = str(inference_mode)
         self.modify_top_k = int(top_k)
-        self.cd_baseline = int(cd_baseline)
         self.value_classifier = value_classifier
         self.loss_type = getattr(value_classifier, "loss_type", "bce")
         self.use_cache = bool(use_cache)
@@ -132,22 +130,16 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
             input_ids, top_k_indices
         ).float()
         if self.inference_mode == "expectation":
-            if self.cd_baseline:
-                logit_offset = self.eta * torch.sigmoid(classifier_logits)
-            else:
-                logit_offset = self.eta * classifier_logits
+            logit_offset = self.eta * classifier_logits
             logit_offset = torch.nan_to_num(
                 logit_offset, nan=0.0, posinf=0.0, neginf=0.0
             )
             return self._modify_top_k(scores, logit_offset, top_k_indices)
 
         if self.inference_mode == "bernoulli":
-            if self.cd_baseline:
-                logit_offset = self.eta * torch.sigmoid(classifier_logits)
-            else:
-                log_numerator = _log1p_exp(self.eta + classifier_logits)
-                log_denominator = _log1p_exp(classifier_logits)
-                logit_offset = log_numerator - log_denominator
+            log_numerator = _log1p_exp(self.eta + classifier_logits)
+            log_denominator = _log1p_exp(classifier_logits)
+            logit_offset = log_numerator - log_denominator
             logit_offset = torch.nan_to_num(
                 logit_offset, nan=0.0, posinf=0.0, neginf=0.0
             )

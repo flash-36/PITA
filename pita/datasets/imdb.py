@@ -36,7 +36,3 @@ class IMDBGen:
             "Continue this movie review in a very positive, enthusiastic tone.\n\n"
             f"Review start:\n\n{question}\n\nPositive continuation:"
         )
-
-    @staticmethod
-    def is_correct(gold: str, pred_text: str) -> bool:
-        return True

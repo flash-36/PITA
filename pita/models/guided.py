@@ -67,17 +67,39 @@ class GuidedHFModel:
         return self.ref.generate_n(prompt, n, greedy=greedy, logits_processor=proc)
 
     @torch.inference_mode()
+    def generate_batch(self, prompts: List[str], *, greedy: bool = False) -> List[str]:
+        proc = self._build_processor()
+        self._reset_state(proc)
+        return self.ref.generate_batch(prompts, greedy=greedy, logits_processor=proc)
+
+    @torch.inference_mode()
     def roll_in(self, full_prompt: str, max_roll_tokens: int) -> Dict[str, Any]:
         proc = self._build_processor()
         self._reset_state(proc)
         return self.ref.roll_in(full_prompt, max_roll_tokens, logits_processor=proc)
 
     @torch.inference_mode()
+    def roll_in_batch(
+        self, full_prompts: List[str], max_roll_tokens: int
+    ) -> List[Dict[str, Any]]:
+        proc = self._build_processor()
+        self._reset_state(proc)
+        return self.ref.roll_in_batch(
+            full_prompts, max_roll_tokens, logits_processor=proc
+        )
+
+    @torch.inference_mode()
     def continue_from_context(
         self, context_text: str, max_new_tokens: int, greedy: bool
     ) -> str:
-        proc = self._build_processor()
-        self._reset_state(proc)
         return self.ref.continue_from_context(
-            context_text, max_new_tokens, greedy, logits_processor=proc
+            context_text, max_new_tokens, greedy, logits_processor=None
+        )
+
+    @torch.inference_mode()
+    def continue_from_context_batch(
+        self, contexts: List[str], max_new_tokens: int, greedy: bool
+    ) -> List[str]:
+        return self.ref.continue_from_context_batch(
+            contexts, max_new_tokens, greedy, logits_processor=None
         )

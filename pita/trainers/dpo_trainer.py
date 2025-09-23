@@ -6,6 +6,7 @@ import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from torch.amp import autocast, GradScaler
 
 from .pairwise import PairwiseTrainerBase
 from pita.models.hf import HFModel
@@ -38,6 +39,24 @@ class DPOTrainer(PairwiseTrainerBase):
             lr=float(self.cfg.lr),
             weight_decay=float(self.cfg.weight_decay),
         )
+        dtype_map = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "fp16": torch.float16,
+            "float32": torch.float32,
+            "fp32": torch.float32,
+        }
+        self.amp_dtype = dtype_map[str(policy.gen_cfg.dtype)]
+        self.autocast_enabled = torch.cuda.is_available() and self.amp_dtype in (
+            torch.bfloat16,
+            torch.float16,
+        )
+        self.scaler = GradScaler(
+            device="cuda",
+            enabled=self.autocast_enabled and self.amp_dtype == torch.float16,
+        )
+        self.micro_batch_size = int(self.cfg.micro_batch_size)
+        self.clear_cache_interval = int(self.cfg.clear_cache_interval)
 
     def dpo_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
         device = self.policy.device
@@ -46,23 +65,33 @@ class DPOTrainer(PairwiseTrainerBase):
 
         # Forward passes for chosen and rejected
         with torch.no_grad():
-            ref_chosen = self.reference(
+            with autocast(
+                device_type="cuda", dtype=self.amp_dtype, enabled=self.autocast_enabled
+            ):
+                ref_chosen = self.reference(
+                    input_ids=batch["chosen_input_ids"],
+                    attention_mask=batch["chosen_attention_mask"],
+                    use_cache=False,
+                ).logits
+                ref_rejected = self.reference(
+                    input_ids=batch["rejected_input_ids"],
+                    attention_mask=batch["rejected_attention_mask"],
+                    use_cache=False,
+                ).logits
+
+        with autocast(
+            device_type="cuda", dtype=self.amp_dtype, enabled=self.autocast_enabled
+        ):
+            pol_chosen = self.policy(
                 input_ids=batch["chosen_input_ids"],
                 attention_mask=batch["chosen_attention_mask"],
+                use_cache=False,
             ).logits
-            ref_rejected = self.reference(
+            pol_rejected = self.policy(
                 input_ids=batch["rejected_input_ids"],
                 attention_mask=batch["rejected_attention_mask"],
+                use_cache=False,
             ).logits
-
-        pol_chosen = self.policy(
-            input_ids=batch["chosen_input_ids"],
-            attention_mask=batch["chosen_attention_mask"],
-        ).logits
-        pol_rejected = self.policy(
-            input_ids=batch["rejected_input_ids"],
-            attention_mask=batch["rejected_attention_mask"],
-        ).logits
 
         # Compute log-probs over response tokens
         ref_lp_ch = self._compute_logps(
@@ -109,22 +138,54 @@ class DPOTrainer(PairwiseTrainerBase):
                 loader, desc=f"DPO:epoch {e + 1}/{total_epochs}", leave=False
             )
             for batch in batch_bar:
-                out = self.dpo_step(batch)
-                loss: torch.Tensor = out["loss"]
-                stats = out["stats"]
-
-                loss.backward()
+                # Optional micro-batching at DPO step granularity
+                if (
+                    self.micro_batch_size
+                    and batch["chosen_input_ids"].size(0) > self.micro_batch_size
+                ):
+                    n = batch["chosen_input_ids"].size(0)
+                    last_stats = None
+                    for s in range(0, n, self.micro_batch_size):
+                        e2 = min(s + self.micro_batch_size, n)
+                        sub = {k: v[s:e2] for k, v in batch.items()}
+                        out = self.dpo_step(sub)
+                        loss: torch.Tensor = out["loss"] * ((e2 - s) / n)
+                        if self.scaler.is_enabled():
+                            self.scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
+                        last_stats = out["stats"]
+                    stats = last_stats or {
+                        "loss": float(loss.detach().item()),
+                        "acc": 0.0,
+                    }
+                else:
+                    out = self.dpo_step(batch)
+                    loss: torch.Tensor = out["loss"]
+                    stats = out["stats"]
+                    if self.scaler.is_enabled():
+                        self.scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
                 if self.cfg.grad_clip and self.cfg.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(
                         self.policy.parameters(), self.cfg.grad_clip
                     )
-                self.optimizer.step()
+                if self.scaler.is_enabled():
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none=True)
 
                 steps += 1
                 accum["loss"] += stats["loss"]
                 accum["acc"] += stats["acc"]
                 batch_bar.set_postfix(loss=stats["loss"], acc=stats["acc"])
+                if self.clear_cache_interval > 0 and (
+                    steps % self.clear_cache_interval == 0
+                ):
+                    torch.cuda.empty_cache()
 
             avg_loss = accum["loss"] / max(1, steps)
             avg_acc = accum["acc"] / max(1, steps)

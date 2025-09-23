@@ -36,7 +36,3 @@ class TLDR:
             "Summarize the following content briefly and clearly.\n\n"
             f"Content:\n\n{question}\n\nSummary:"
         )
-
-    @staticmethod
-    def is_correct(gold: str, pred_text: str) -> bool:
-        return True
