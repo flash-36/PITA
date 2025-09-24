@@ -7,7 +7,7 @@ experiment:
 
 # Global/common hyperparams
 common:
-  max_new_tokens: 512
+  max_new_tokens: 1024
   temperature: 0.8
   top_p: 0.9
   dtype: bfloat16
@@ -49,7 +49,7 @@ evaluation:
 collection:
   samples_per_example: 4
   seed: 42
-  max_examples: 1
+  max_examples: 0
   reward_batch_size: 2
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
@@ -102,9 +102,10 @@ algos:
 
 # Model pairs; map of ref -> classifier
 model_pairs:
-  # - gemma
-  # - llama
+  - gemma
+  - llama
   - phi
+
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
 datasets:
