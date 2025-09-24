@@ -124,6 +124,8 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
             logit_offset = torch.nan_to_num(
                 logit_offset, nan=0.0, posinf=0.0, neginf=0.0
             )
+            # Match dtype with scores to avoid scatter_add dtype mismatch
+            logit_offset = logit_offset.to(dtype=scores.dtype)
             return self._modify_top_k(scores, logit_offset, top_k_indices)
 
         classifier_logits = self._get_classifier_values(
@@ -134,6 +136,8 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
             logit_offset = torch.nan_to_num(
                 logit_offset, nan=0.0, posinf=0.0, neginf=0.0
             )
+            # Match dtype with scores to avoid scatter_add dtype mismatch
+            logit_offset = logit_offset.to(dtype=scores.dtype)
             return self._modify_top_k(scores, logit_offset, top_k_indices)
 
         if self.inference_mode == "bernoulli":
@@ -143,6 +147,8 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
             logit_offset = torch.nan_to_num(
                 logit_offset, nan=0.0, posinf=0.0, neginf=0.0
             )
+            # Match dtype with scores to avoid scatter_add dtype mismatch
+            logit_offset = logit_offset.to(dtype=scores.dtype)
             return self._modify_top_k(scores, logit_offset, top_k_indices)
 
         return scores

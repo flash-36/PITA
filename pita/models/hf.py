@@ -145,36 +145,6 @@ class HFModel:
         ]
 
     @torch.inference_mode()
-    def generate_batch(
-        self,
-        prompts: List[str],
-        *,
-        greedy: bool = False,
-        max_new_tokens: Optional[int] = None,
-        logits_processor: Optional[LogitsProcessorList] = None,
-    ) -> List[str]:
-        inputs = self.tokenizer(
-            prompts, return_tensors="pt", padding=True, truncation=False
-        ).to(self.model.device)
-        out = self.model.generate(
-            **inputs,
-            **self._gen_kwargs(
-                greedy=greedy,
-                logits_processor=logits_processor,
-                max_new_tokens=max_new_tokens,
-            ),
-        )
-        in_lens = inputs["input_ids"].shape[1]
-        texts: List[str] = []
-        for i, seq in enumerate(out):
-            base = inputs["input_ids"][i]
-            seq_len = base.shape[0]
-            texts.append(
-                self.tokenizer.decode(seq[seq_len:], skip_special_tokens=True).strip()
-            )
-        return texts
-
-    @torch.inference_mode()
     def roll_in(
         self,
         full_prompt: str,
@@ -208,49 +178,6 @@ class HFModel:
         }
 
     @torch.inference_mode()
-    def roll_in_batch(
-        self,
-        full_prompts: List[str],
-        max_roll_tokens: int,
-        logits_processor: Optional[LogitsProcessorList] = None,
-    ) -> List[Dict[str, Any]]:
-        built_list = [
-            build_instruction_prompt(
-                p,
-                tokenizer=self.tokenizer,
-                use_chat_template=self.gen_cfg.use_chat_template,
-            )
-            for p in full_prompts
-        ]
-        ids = self.tokenizer(
-            built_list, return_tensors="pt", padding=True, truncation=False
-        ).to(self.model.device)
-        padded_in_len = int(ids["input_ids"].shape[1])
-        out = self.model.generate(
-            **ids,
-            **self._gen_kwargs(
-                greedy=True,
-                logits_processor=logits_processor,
-                max_new_tokens=max_roll_tokens,
-            ),
-        )
-        results: List[Dict[str, Any]] = []
-        for i, seq in enumerate(out):
-            context_tokens = seq
-            context_text = self.tokenizer.decode(
-                context_tokens, skip_special_tokens=True
-            )
-            results.append(
-                {
-                    "prompt": built_list[i],
-                    "context_ids": context_tokens,
-                    "context_text": context_text,
-                    "padded_in_len": padded_in_len,
-                }
-            )
-        return results
-
-    @torch.inference_mode()
     def continue_from_context(
         self,
         context_text: str,
@@ -269,31 +196,3 @@ class HFModel:
         )
         new_tokens = out[0][ids["input_ids"].shape[1] :]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-
-    @torch.inference_mode()
-    def continue_from_context_batch(
-        self,
-        contexts: List[str],
-        max_new_tokens: int,
-        greedy: bool,
-        logits_processor: Optional[LogitsProcessorList] = None,
-    ) -> List[str]:
-        ids = self.tokenizer(
-            contexts, return_tensors="pt", padding=True, truncation=False
-        ).to(self.model.device)
-        out = self.model.generate(
-            **ids,
-            **self._gen_kwargs(
-                greedy=greedy,
-                logits_processor=logits_processor,
-                max_new_tokens=max_new_tokens,
-            ),
-        )
-        seq_lens = ids["input_ids"].shape[1]
-        texts: List[str] = []
-        for i, seq in enumerate(out):
-            base_len = ids["input_ids"][i].shape[0]
-            texts.append(
-                self.tokenizer.decode(seq[base_len:], skip_special_tokens=True).strip()
-            )
-        return texts

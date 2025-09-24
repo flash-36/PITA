@@ -19,6 +19,9 @@ class DPOTrainer(PairwiseTrainerBase):
         reference: HFModel,
         dpo_cfg: Any = None,
         use_chat_template: bool = True,
+        micro_batch_size: int = 0,
+        amp_dtype: str | None = None,
+        clear_cache_interval: int = 0,
     ) -> None:
         self.cfg = dpo_cfg
         super().__init__(
@@ -46,7 +49,7 @@ class DPOTrainer(PairwiseTrainerBase):
             "float32": torch.float32,
             "fp32": torch.float32,
         }
-        self.amp_dtype = dtype_map[str(policy.gen_cfg.dtype)]
+        self.amp_dtype = dtype_map[str(amp_dtype or policy.gen_cfg.dtype)]
         self.autocast_enabled = torch.cuda.is_available() and self.amp_dtype in (
             torch.bfloat16,
             torch.float16,
@@ -55,8 +58,8 @@ class DPOTrainer(PairwiseTrainerBase):
             device="cuda",
             enabled=self.autocast_enabled and self.amp_dtype == torch.float16,
         )
-        self.micro_batch_size = int(self.cfg.micro_batch_size)
-        self.clear_cache_interval = int(self.cfg.clear_cache_interval)
+        self.micro_batch_size = int(micro_batch_size)
+        self.clear_cache_interval = int(clear_cache_interval)
 
     def dpo_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
         device = self.policy.device

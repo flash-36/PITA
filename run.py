@@ -54,7 +54,8 @@ def main(cfg: DictConfig) -> None:
         ref_model_alias, value_model_alias = resolve_family_pair(str(family))
         model_pairs.append((str(family), ref_model_alias, value_model_alias))
 
-    datasets = list(cfg.datasets.keys())
+    # Use configured training datasets subset
+    datasets = list(cfg.training.datasets)
     algo_registry = get_algorithm_registry()
 
     rounds = int(cfg.rounds_of_training)

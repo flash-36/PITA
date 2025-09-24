@@ -158,6 +158,7 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                 V_max=float(self.cfg.V_max),
                 attn_impl=str(cfg.common.attn_impl),
                 dtype=str(cfg.common.amp_dtype),
+                gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
             )
             run_root = get_run_root()
             ckpt_loaded = self.maybe_load_classifier_from_prev_round(
@@ -185,86 +186,70 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         records: List[Dict[str, Any]] = []
         max_examples = int(cfg.collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
-        gb = int(cfg.common.gen_batch_size)
-        it = islice(ds.iter(), limit)
-        pbar = tqdm(total=limit, desc=f"{self.algo_key}:{dataset}:{family}")
-        while True:
-            chunk = list(islice(it, gb))
-            if not chunk:
-                break
-            prompts = [ds.hydrate_prompt(ex.question) for ex in chunk]
-            rollouts = model.roll_in_batch(
-                prompts, max_roll_tokens=gen_cfg.max_new_tokens
-            )
+        for ex in tqdm(
+            islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
+        ):
+            prompt = ds.hydrate_prompt(ex.question)
+            rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
 
-            # Group by remaining token budget to batch continuations
-            budget_to_items: Dict[int, List[Tuple[Any, str, str, str]]] = {}
-            for ex, prompt, rollout in zip(chunk, prompts, rollouts):
-                built_prompt = rollout["prompt"]
-                context_token_ids = rollout["context_ids"].tolist()
-                full_token_count = len(context_token_ids)
-                padded_in_len = int(
-                    rollout.get(
-                        "padded_in_len", len(model.tokenizer(built_prompt)["input_ids"])
-                    )
-                )
-                rollout_token_count = full_token_count - padded_in_len
-                if rollout_token_count < 2:
-                    continue
-                for _ in range(samples_per_example):
-                    cutoff_tokens = random.randint(1, rollout_token_count - 1)
-                    context_prefix_ids = context_token_ids[
-                        : padded_in_len + cutoff_tokens
-                    ]
-                    context_text = model.tokenizer.decode(
-                        context_prefix_ids, skip_special_tokens=True
-                    )
-                    solution_prefix_ids = context_prefix_ids[padded_in_len:]
-                    solution_prefix_text = model.tokenizer.decode(
-                        solution_prefix_ids, skip_special_tokens=True
-                    )
-                    remaining = int(gen_cfg.max_new_tokens - cutoff_tokens)
-                    budget_to_items.setdefault(remaining, []).append(
-                        (ex, prompt, solution_prefix_text, context_text)
-                    )
+            built_prompt = rollout["prompt"]
+            prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
+            context_token_ids = rollout["context_ids"].tolist()
+            full_token_count = len(context_token_ids)
+            rollout_token_count = full_token_count - prompt_token_count
 
-            total_items = sum(len(v) for v in budget_to_items.values())
-            cont_bar = tqdm(
-                total=total_items, desc=f"{self.algo_key}:{dataset}:cont", leave=False
-            )
-            for remaining, items in budget_to_items.items():
-                contexts = [ctx for (_, _, _, ctx) in items]
-                y_refs = model.continue_from_context_batch(
-                    contexts, max_new_tokens=remaining, greedy=True
+            if rollout_token_count < 2:
+                logger.info(
+                    "Skipping example due to short rollout: dataset={} family={} prompt_tokens={} rollout_tokens={}",
+                    dataset,
+                    str(family),
+                    prompt_token_count,
+                    rollout_token_count,
                 )
-                y_samps = model.continue_from_context_batch(
-                    contexts, max_new_tokens=remaining, greedy=False
-                )
-                for (ex, prompt, sol_prefix, _), y_ref, y_sample in zip(
-                    items, y_refs, y_samps
-                ):
-                    y_a = sol_prefix + y_ref
-                    y_b = sol_prefix + y_sample
-                    score_a, score_b, preferred = self.score_samples(ex, y_a, y_b)
-                    records.append(
-                        {
-                            "question": ex.question,
-                            "answer": ex.answer,
-                            "prompt": prompt,
-                            "t": None,
-                            "context": prompt + sol_prefix,
-                            "y_a": y_a,
-                            "y_b": y_b,
-                            "score_a": score_a,
-                            "score_b": score_b,
-                            "preferred": preferred,
-                        }
-                    )
-                cont_bar.update(len(items))
-            cont_bar.close()
-            pbar.update(len(chunk))
+                continue
 
-        pbar.close()
+            for _ in range(samples_per_example):
+                cutoff_tokens = random.randint(1, rollout_token_count - 1)
+
+                context_prefix_ids = context_token_ids[
+                    : prompt_token_count + cutoff_tokens
+                ]
+                context_text = model.tokenizer.decode(
+                    context_prefix_ids, skip_special_tokens=True
+                )
+                solution_prefix_ids = context_prefix_ids[prompt_token_count:]
+                solution_prefix_text = model.tokenizer.decode(
+                    solution_prefix_ids, skip_special_tokens=True
+                )
+
+                remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
+                y_ref = model.continue_from_context(
+                    context_text, max_new_tokens=remaining_token_budget, greedy=True
+                )
+                y_sample = model.continue_from_context(
+                    context_text, max_new_tokens=remaining_token_budget, greedy=False
+                )
+
+                y_a = solution_prefix_text + y_ref
+                y_b = solution_prefix_text + y_sample
+
+                score_a, score_b, preferred = self.score_samples(ex, y_a, y_b)
+
+                records.append(
+                    {
+                        "question": ex.question,
+                        "answer": ex.answer,
+                        "prompt": prompt,
+                        "t": cutoff_tokens,
+                        "context": prompt + solution_prefix_text,
+                        "y_a": y_a,
+                        "y_b": y_b,
+                        "score_a": score_a,
+                        "score_b": score_b,
+                        "preferred": preferred,
+                    }
+                )
+
         if not records:
             return
         new_ds = Dataset.from_list(records)
@@ -284,6 +269,13 @@ class ValueGuidedAlgorithms(AlgorithmBase):
             cls_model_alias,
             tokenizer=ref_model.tokenizer,
             device=ref_model.model.device,
+            loss_type=str(self.cfg.loss_type),
+            num_atoms=int(self.cfg.num_atoms),
+            V_min=float(self.cfg.V_min),
+            V_max=float(self.cfg.V_max),
+            attn_impl=str(cfg.common.attn_impl),
+            dtype=str(cfg.common.amp_dtype),
+            gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
         )
         g = GuidanceConfig(
             eta=float(self.cfg.guidance.eta),

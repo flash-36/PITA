@@ -14,75 +14,96 @@ common:
   use_chat_template: true
   bt_sampling: true
   bt_beta: 1.0
-  attn_impl: eager
+  attn_impl: sdpa
   amp_dtype: bfloat16
   micro_batch_size: 0
   clear_cache_interval: 0
   gradient_checkpointing: false
-  gen_batch_size: 8
 
 # Number of iterative rounds: generate -> train -> regenerate -> train ...
 rounds_of_training: 2
 
+# Training/evaluation control
+training:
+  # Which datasets to train on
+  datasets:
+    - GSM8K
+    - TLDR
+    - IMDBGen
+
+evaluation:
+  # Evaluate guided decoding at multiple eta values
+  etas: [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+  # For each training dataset, which datasets to evaluate on
+  datasets_by_train:
+    GSM8K:
+      - GSM8K
+      - MATH
+      - AIME
+    TLDR:
+      - TLDR
+    IMDBGen:
+      - IMDBGen
+
 # Data collection hyperparams
 collection:
-  samples_per_example: 4
-  seed: 47
-  max_examples: 16
+  samples_per_example: 2
+  seed: 42
+  max_examples: 1
   reward_batch_size: 2
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
-  PITA:
-    epochs: 3
-    batch_size: 8
-    num_workers: 2
-    lr: 2.0e-5
-    weight_decay: 0.0
-    grad_clip: 1.0
-    loss_type: bce
-    num_atoms: 11
-    V_min: 0.0
-    V_max: 1.0
-    guidance:
-      eta: 1.0
-      mode: expectation
-      top_k: 20
-      use_cache: false
-  QSharp:
-    epochs: 3
-    batch_size: 8
-    num_workers: 2
-    lr: 2.0e-5
-    weight_decay: 0.0
-    grad_clip: 1.0
-    loss_type: bce
-    num_atoms: 11
-    V_min: 0.0
-    V_max: 1.0
-    guidance:
-      eta: 1.0
-      mode: bernoulli
-      top_k: 20
-      use_cache: false
-  # QSharpHF: {}
-  # DPO:
-  #   bt_beta: 1.0
-  #   beta: 0.1
+  # PITA:
+  #   epochs: 3
+  #   batch_size: 16
+  #   num_workers: 2
   #   lr: 2.0e-5
   #   weight_decay: 0.0
-  #   epochs: 5
   #   grad_clip: 1.0
-  #   batch_size: 8
+  #   loss_type: bce
+  #   num_atoms: 11
+  #   V_min: 0.0
+  #   V_max: 1.0
+  #   guidance:
+  #     eta: 1.0
+  #     mode: expectation
+  #     top_k: 20
+  #     use_cache: false
+  # QSharp:
+  #   epochs: 3
+  #   batch_size: 16
   #   num_workers: 2
+  #   lr: 2.0e-5
+  #   weight_decay: 0.0
+  #   grad_clip: 1.0
+  #   loss_type: bce
+  #   num_atoms: 11
+  #   V_min: 0.0
+  #   V_max: 1.0
+  #   guidance:
+  #     eta: 1.0
+  #     mode: bernoulli
+  #     top_k: 20
+  #     use_cache: false
+  # QSharpHF: {}
+  DPO:
+    bt_beta: 1.0
+    beta: 0.1
+    lr: 2.0e-5
+    weight_decay: 0.0
+    epochs: 5
+    grad_clip: 1.0
+    batch_size: 8
+    num_workers: 2
   # RLHF:
   #   bt_beta: 1.0
   # BEST_OF_N: {}
 
 # Model pairs; map of ref -> classifier
 model_pairs:
-  - gemma
-  - llama
+  # - gemma
+  # - llama
   - gpt
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
@@ -93,7 +114,7 @@ datasets:
     question_key: question
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
-    test_hf_config: AIME2025-II
+    test_hf_config: AIME2025-I
     test_split: test
   GSM8K:
     train_hf_config: main
@@ -119,12 +140,14 @@ datasets:
     reward_model: lvwerra/distilbert-imdb
     test_hf_config: ""
     test_split: test
-  # MATH:
-  #   train_hf_config: ""
-  #   train_split: test
-  #   question_key: problem
-  #   answer_key: answer
-  #   reward_model: weqweasdas/RM-Gemma-2B
+  MATH:
+    train_hf_config: ""
+    train_split: test
+    question_key: problem
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: ""
+    test_split: test
 
 # Hydra output directory
 hydra:

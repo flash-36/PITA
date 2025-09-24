@@ -81,3 +81,26 @@ class RewardScorer:
         else:
             preferred = 0 if r_a >= r_b else 1
         return r_a, r_b, preferred
+
+    def score_single(self, question: str, y: str) -> float:
+        # IMDb reward model scores the text directly
+        if "distilbert-imdb" in self._model_id:
+            outs = self._pipe(
+                [y], top_k=None, function_to_apply="none", batch_size=self._batch_size
+            )
+            # outs[0] is a list of label scores
+            return [d for d in outs[0] if d["label"] == "POSITIVE"][0]["score"]
+        # Otherwise, score the (question, answer) pair using the reward prompt
+        texts = build_reward_model_prompt(
+            question=question, y_a=y, y_b=y, tokenizer=self._tokenizer
+        )
+        # Feed only the first constructed input to avoid duplicate compute
+        outs = self._pipe(
+            [texts[0]],
+            top_k=None,
+            function_to_apply="none",
+            batch_size=self._batch_size,
+        )
+        if isinstance(outs[0], list):
+            return float(outs[0][0]["score"])  # type: ignore[index]
+        return float(outs[0]["score"])  # type: ignore[index]

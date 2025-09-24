@@ -61,12 +61,18 @@ class ValueClassifier(nn.Module):
             self.atoms = torch.linspace(self.V_min, self.V_max, self.num_atoms).float()
 
         out_dim = 1 if self.loss_type != "mle" else self.num_atoms
-        self.score = nn.Linear(hidden_size, out_dim, bias=True)
-        backbone_dtype = next(self.backbone.parameters()).dtype
+        # Ensure the classifier head matches the backbone parameter dtype/device
+        backbone_param = next(self.backbone.parameters())
+        self.score = nn.Linear(
+            hidden_size,
+            out_dim,
+            bias=True,
+            device=backbone_param.device,
+            dtype=backbone_param.dtype,
+        )
         if device is not None:
-            self.score = self.score.to(device=device, dtype=backbone_dtype)
-        else:
-            self.score = self.score.to(dtype=backbone_dtype)
+            # Keep explicit device move for safety in case backbone moved after init
+            self.score = self.score.to(device)
 
     @property
     def device(self) -> torch.device:

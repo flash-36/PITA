@@ -9,7 +9,7 @@ from pita.datasets import PreferencePairDataset
 from pita.core.registry import register_algorithm
 from .base import PostTrainingAlgorithms
 from pita.core.io import get_run_root, get_snapshot_paths
-from pita.eval.evaluate import evaluate_pass1_maj8
+from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
 
 
 @register_algorithm("DPO")
@@ -47,6 +47,9 @@ class DPOAlgorithm(PostTrainingAlgorithms):
             reference=reference,
             dpo_cfg=self.cfg,
             use_chat_template=bool(cfg.common.use_chat_template),
+            micro_batch_size=int(cfg.common.micro_batch_size),
+            amp_dtype=str(cfg.common.amp_dtype),
+            clear_cache_interval=int(cfg.common.clear_cache_interval),
         )
 
         loader = trainer.create_loader(ds, shuffle=True)
@@ -57,10 +60,32 @@ class DPOAlgorithm(PostTrainingAlgorithms):
         trainer.policy.save_pretrained(str(ckpt_dir))
         trainer.tokenizer.save_pretrained(str(ckpt_dir))
 
-        # Evaluate pass@1 and maj@8 on test split using the trained policy
+        # Evaluate on one or more datasets using the trained policy
         eval_model = self._build_model(cfg, str(ckpt_dir))
-        eval_metrics = evaluate_pass1_maj8(
-            cfg, eval_model, dataset, save_dir=output_dir
+        eval_map: Dict[str, Dict[str, float]] = {}
+        eval_targets = list(
+            getattr(cfg.evaluation.datasets_by_train, dataset, [dataset])
+        )
+        for eval_ds in eval_targets:
+            if eval_ds in {"TLDR", "IMDBGen"}:
+                metrics = evaluate_avg_reward(
+                    cfg,
+                    eval_model,
+                    eval_ds,
+                    ref_model=reference,
+                    save_dir=output_dir / f"eval_{eval_ds}",
+                )
+            else:
+                metrics = evaluate_pass1_maj8(
+                    cfg,
+                    eval_model,
+                    eval_ds,
+                    ref_model=reference,
+                    save_dir=output_dir / f"eval_{eval_ds}",
+                )
+            eval_map[eval_ds] = metrics
+        primary_metrics = eval_map.get(dataset) or (
+            next(iter(eval_map.values())) if eval_map else {}
         )
 
         result = {
@@ -72,15 +97,25 @@ class DPOAlgorithm(PostTrainingAlgorithms):
                 "trained_steps": int(stats.get("steps", 0)),
                 "loss": float(stats.get("loss", 0.0) or 0.0),
                 "acc": float(stats.get("acc", 0.0) or 0.0),
-                **eval_metrics,
+                **primary_metrics,
             },
+            "eval": eval_map,
         }
-        logger.info(
-            "✅ DPO done: steps={} loss={:.4f} acc={:.4f} pass@1={:.3f} maj@8={:.3f}",
-            int(result["metrics"]["trained_steps"]),
-            float(result["metrics"]["loss"]),
-            float(result["metrics"]["acc"]),
-            float(result["metrics"].get("pass@1", 0.0) or 0.0),
-            float(result["metrics"].get("maj@8", 0.0) or 0.0),
-        )
+        if "avg_reward" in primary_metrics:
+            logger.info(
+                "✅ DPO done: steps={} loss={:.4f} acc={:.4f} avg_reward={:.4f}",
+                int(result["metrics"]["trained_steps"]),
+                float(result["metrics"]["loss"]),
+                float(result["metrics"].get("acc", 0.0) or 0.0),
+                float(primary_metrics.get("avg_reward", 0.0) or 0.0),
+            )
+        else:
+            logger.info(
+                "✅ DPO done: steps={} loss={:.4f} acc={:.4f} pass@1={:.3f} maj@8={:.3f}",
+                int(result["metrics"]["trained_steps"]),
+                float(result["metrics"]["loss"]),
+                float(result["metrics"].get("acc", 0.0) or 0.0),
+                float(primary_metrics.get("pass@1", 0.0) or 0.0),
+                float(primary_metrics.get("maj@8", 0.0) or 0.0),
+            )
         return result
