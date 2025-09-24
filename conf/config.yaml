@@ -49,13 +49,13 @@ evaluation:
 collection:
   samples_per_example: 4
   seed: 42
-  max_examples: 0
+  max_examples: 1000
   reward_batch_size: 2
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
   PITA:
-    epochs: 3
+    epochs: 5
     batch_size: 16
     num_workers: 2
     lr: 2.0e-5
@@ -71,7 +71,7 @@ algos:
       top_k: 20
       use_cache: false
   QSharp:
-    epochs: 3
+    epochs: 5
     batch_size: 16
     num_workers: 2
     lr: 2.0e-5
@@ -96,8 +96,20 @@ algos:
     grad_clip: 1.0
     batch_size: 8
     num_workers: 2
-  # RLHF:
-  #   bt_beta: 1.0
+  RLHF:
+    bt_beta: 1.0
+    lr: 2.0e-5
+    weight_decay: 0.0
+    epochs: 1
+    rm_epochs: 1
+    grad_clip: 1.0
+    batch_size: 4
+    num_workers: 2
+    loss_type: bce
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
+    rollout_per_prompt: 1
   # BEST_OF_N: {}
 
 # Model pairs; map of ref -> classifier
