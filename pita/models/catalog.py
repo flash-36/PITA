@@ -10,6 +10,9 @@ _ALIAS_TO_ID: Dict[str, str] = {
     "gemma-4b": "google/gemma-3-4b-it",
     "gpt2-medium": "openai-community/gpt2-medium",
     "gpt2": "openai-community/gpt2",
+    # Phi aliases
+    "phi-mini": "microsoft/Phi-4-mini-reasoning",
+    "phi-plus": "microsoft/Phi-4-reasoning-plus",
 }
 
 
@@ -17,6 +20,8 @@ _FAMILY_TO_PAIR: Dict[str, Tuple[str, str]] = {
     "llama": ("llama-3b", "llama-1b"),
     "gemma": ("gemma-4b", "gemma-1b"),
     "gpt": ("gpt2-medium", "gpt2"),
+    # Phi family: (ref_model_alias, value_classifier_alias)
+    "phi": ("phi-plus", "phi-mini"),
 }
 
 

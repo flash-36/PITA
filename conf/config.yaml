@@ -7,7 +7,7 @@ experiment:
 
 # Global/common hyperparams
 common:
-  max_new_tokens: 256
+  max_new_tokens: 512
   temperature: 0.8
   top_p: 0.9
   dtype: bfloat16
@@ -47,45 +47,45 @@ evaluation:
 
 # Data collection hyperparams
 collection:
-  samples_per_example: 2
+  samples_per_example: 4
   seed: 42
   max_examples: 1
   reward_batch_size: 2
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 algos:
-  # PITA:
-  #   epochs: 3
-  #   batch_size: 16
-  #   num_workers: 2
-  #   lr: 2.0e-5
-  #   weight_decay: 0.0
-  #   grad_clip: 1.0
-  #   loss_type: bce
-  #   num_atoms: 11
-  #   V_min: 0.0
-  #   V_max: 1.0
-  #   guidance:
-  #     eta: 1.0
-  #     mode: expectation
-  #     top_k: 20
-  #     use_cache: false
-  # QSharp:
-  #   epochs: 3
-  #   batch_size: 16
-  #   num_workers: 2
-  #   lr: 2.0e-5
-  #   weight_decay: 0.0
-  #   grad_clip: 1.0
-  #   loss_type: bce
-  #   num_atoms: 11
-  #   V_min: 0.0
-  #   V_max: 1.0
-  #   guidance:
-  #     eta: 1.0
-  #     mode: bernoulli
-  #     top_k: 20
-  #     use_cache: false
+  PITA:
+    epochs: 3
+    batch_size: 16
+    num_workers: 2
+    lr: 2.0e-5
+    weight_decay: 0.0
+    grad_clip: 1.0
+    loss_type: bce
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
+    guidance:
+      eta: 1.0
+      mode: expectation
+      top_k: 20
+      use_cache: false
+  QSharp:
+    epochs: 3
+    batch_size: 16
+    num_workers: 2
+    lr: 2.0e-5
+    weight_decay: 0.0
+    grad_clip: 1.0
+    loss_type: bce
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
+    guidance:
+      eta: 1.0
+      mode: bernoulli
+      top_k: 20
+      use_cache: false
   # QSharpHF: {}
   DPO:
     bt_beta: 1.0
@@ -104,7 +104,7 @@ algos:
 model_pairs:
   # - gemma
   # - llama
-  - gpt
+  - phi
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
 datasets:
