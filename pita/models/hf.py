@@ -186,6 +186,16 @@ class HFModel:
         logits_processor: Optional[LogitsProcessorList] = None,
     ) -> str:
         ids = self.tokenizer(context_text, return_tensors="pt").to(self.model.device)
+
+        max_position_embeddings = getattr(
+            self.model.config, "max_position_embeddings", 2048
+        )
+        max_length_for_gen = max_position_embeddings - max_new_tokens
+
+        if ids["input_ids"].shape[1] > max_length_for_gen:
+            ids["input_ids"] = ids["input_ids"][:, -max_length_for_gen:]
+            ids["attention_mask"] = ids["attention_mask"][:, -max_length_for_gen:]
+
         out = self.model.generate(
             **ids,
             **self._gen_kwargs(
