@@ -105,6 +105,21 @@ algos:
   #   grad_clip: 1.0
   #   batch_size: 8
   #   num_workers: 2
+  GRPO-HF:
+    samples_per_prompt: 4
+    kl_coef: 0.05
+    lr: 2.0e-5
+    cls_lr: 2.0e-5
+    weight_decay: 0.0
+    epochs: 5
+    cls_epochs: 3
+    grad_clip: 1.0
+    batch_size: 8
+    num_workers: 2
+    loss_type: bce
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
   # BEST_OF_N: {}
 
 # Model pairs; map of ref -> classifier
