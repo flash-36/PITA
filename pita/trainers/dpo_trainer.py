@@ -160,9 +160,13 @@ class DPOTrainer(PairwiseTrainerBase):
         return {"loss": loss, "stats": stats}
 
     def train(self, loader: DataLoader, epochs: int = 1) -> Dict[str, Any]:
-        self.policy, self.reference, self.optimizer, loader = self.accelerator.prepare(
-            self.policy, self.reference, self.optimizer, loader
+        # For FSDP/DDP, prepare only the policy model (which we train) and optimizer
+        # Keep reference model on CPU or handle separately to avoid FSDP2 conflicts
+        self.policy, self.optimizer, loader = self.accelerator.prepare(
+            self.policy, self.optimizer, loader
         )
+        # Move reference to same device as policy but don't wrap
+        self.reference = self.reference.to(self.accelerator.device)
         self.policy.train()
         steps = 0
         opt_steps = 0
