@@ -50,6 +50,11 @@ class DPOAlgorithm(PostTrainingAlgorithms):
             micro_batch_size=int(cfg.common.micro_batch_size),
             amp_dtype=str(cfg.common.amp_dtype),
             clear_cache_interval=int(cfg.common.clear_cache_interval),
+            grad_accumulation_steps=int(getattr(self.cfg, "gradient_accumulation_steps", 1) or 1),
+            warmup_steps=int(getattr(self.cfg, "warmup_steps", 0) or 0),
+            save_dir=str(output_dir),
+            ckpt_freq=int(getattr(self.cfg, "ckpt_freq", -1) or -1),
+            eval_freq=int(getattr(self.cfg, "eval_freq", -1) or -1),
         )
 
         loader = trainer.create_loader(ds, shuffle=True)
@@ -57,33 +62,42 @@ class DPOAlgorithm(PostTrainingAlgorithms):
 
         ckpt_dir = self.get_ckpt_dir(run_root, dataset, family, round_idx)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        trainer.policy.save_pretrained(str(ckpt_dir))
-        trainer.tokenizer.save_pretrained(str(ckpt_dir))
+        # Sync and save only on main process, unwrapping the potentially wrapped model
+        if hasattr(trainer, "accelerator"):
+            trainer.accelerator.wait_for_everyone()
+        if getattr(trainer, "is_main_process", True):
+            try:
+                unwrapped = trainer.unwrap_policy()
+            except Exception:
+                unwrapped = trainer.policy
+            unwrapped.save_pretrained(str(ckpt_dir))
+            trainer.tokenizer.save_pretrained(str(ckpt_dir))
 
         # Evaluate on one or more datasets using the trained policy
-        eval_model = self._build_model(cfg, str(ckpt_dir))
         eval_map: Dict[str, Dict[str, float]] = {}
-        eval_targets = list(
-            getattr(cfg.evaluation.datasets_by_train, dataset, [dataset])
-        )
-        for eval_ds in eval_targets:
-            if eval_ds in {"TLDR", "IMDBGen"}:
-                metrics = evaluate_avg_reward(
-                    cfg,
-                    eval_model,
-                    eval_ds,
-                    ref_model=reference,
-                    save_dir=output_dir / f"eval_{eval_ds}",
-                )
-            else:
-                metrics = evaluate_pass1_maj8(
-                    cfg,
-                    eval_model,
-                    eval_ds,
-                    ref_model=reference,
-                    save_dir=output_dir / f"eval_{eval_ds}",
-                )
-            eval_map[eval_ds] = metrics
+        if getattr(trainer, "is_main_process", True):
+            eval_model = self._build_model(cfg, str(ckpt_dir))
+            eval_targets = list(
+                getattr(cfg.evaluation.datasets_by_train, dataset, [dataset])
+            )
+            for eval_ds in eval_targets:
+                if eval_ds in {"TLDR", "IMDBGen"}:
+                    metrics = evaluate_avg_reward(
+                        cfg,
+                        eval_model,
+                        eval_ds,
+                        ref_model=reference,
+                        save_dir=output_dir / f"eval_{eval_ds}",
+                    )
+                else:
+                    metrics = evaluate_pass1_maj8(
+                        cfg,
+                        eval_model,
+                        eval_ds,
+                        ref_model=reference,
+                        save_dir=output_dir / f"eval_{eval_ds}",
+                    )
+                eval_map[eval_ds] = metrics
         primary_metrics = eval_map.get(dataset) or (
             next(iter(eval_map.values())) if eval_map else {}
         )

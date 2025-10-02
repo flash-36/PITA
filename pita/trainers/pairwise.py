@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Iterator
 
 import torch
-from torch.utils.data import Dataset as TorchDataset, DataLoader
+from torch.utils.data import Dataset as TorchDataset, DataLoader, Sampler, BatchSampler, DistributedSampler
 from transformers import PreTrainedTokenizerBase
 from pita.core.prompts import build_instruction_prompt
+import random
 
 
 class PairwiseTrainerBase:
@@ -30,6 +31,67 @@ class PairwiseTrainerBase:
         self.batch_size = int(batch_size)
         self.num_workers = int(num_workers)
         self.dtype_str = str(dtype)
+
+    class DynamicBatchSampler(BatchSampler):
+        def __init__(
+            self,
+            dataset: TorchDataset,
+            tokenizer: PreTrainedTokenizerBase,
+            use_chat_template: bool,
+            max_batch_num_tokens: int,
+            *,
+            shuffle: bool = True,
+        ) -> None:
+            self.dataset = dataset
+            self.tokenizer = tokenizer
+            self.use_chat_template = bool(use_chat_template)
+            self.max_tokens = int(max_batch_num_tokens)
+            self.shuffle = bool(shuffle)
+            self.epoch = 0
+
+        def __len__(self) -> int:
+            # Rough estimate: conservative lower bound assuming each example at least 1 token
+            return max(1, len(self.dataset))
+
+        def set_epoch(self, epoch: int) -> None:
+            self.epoch = int(epoch)
+
+        def _estimate_tokens(self, idx: int) -> int:
+            ex = self.dataset[int(idx)]
+            prompt = build_instruction_prompt(
+                ex.prompt, tokenizer=self.tokenizer, use_chat_template=self.use_chat_template
+            )
+            # Estimate by token length of prompt+max(chosen,rejected)
+            p_ids = self.tokenizer(prompt, add_special_tokens=False).get("input_ids", [])
+            c_ids = self.tokenizer(ex.chosen, add_special_tokens=False).get("input_ids", [])
+            r_ids = self.tokenizer(ex.rejected, add_special_tokens=False).get("input_ids", [])
+            resp_len = max(len(c_ids), len(r_ids))
+            return len(p_ids) + resp_len
+
+        def __iter__(self) -> Iterator[List[int]]:
+            n = len(self.dataset)
+            indices = list(range(n))
+            if self.shuffle:
+                rng = random.Random(self.epoch)
+                rng.shuffle(indices)
+            # Shard indices across distributed ranks if initialized
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                rank = torch.distributed.get_rank()
+                world_size = torch.distributed.get_world_size()
+                indices = indices[rank::world_size]
+
+            batch: List[int] = []
+            cur_tokens = 0
+            for idx in indices:
+                est = self._estimate_tokens(idx)
+                if batch and cur_tokens + est > self.max_tokens:
+                    yield batch
+                    batch = []
+                    cur_tokens = 0
+                batch.append(idx)
+                cur_tokens += est
+            if batch:
+                yield batch
 
     def _tokenize_batch(
         self, batch: List[Any], max_length: Optional[int] = None
@@ -142,12 +204,36 @@ class PairwiseTrainerBase:
         return seq_logps
 
     def create_loader(self, ds: TorchDataset, shuffle: bool = True) -> DataLoader:
-        return DataLoader(
-            ds,
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            num_workers=self.num_workers,
-            collate_fn=lambda batch: self._tokenize_batch(batch),
-            pin_memory=True,
-            persistent_workers=(self.num_workers > 0),
-        )
+        max_tokens = int(getattr(self, "max_batch_num_tokens", -1) or -1)
+        if max_tokens > 0:
+            sampler = self.DynamicBatchSampler(
+                ds,
+                tokenizer=self.tokenizer,
+                use_chat_template=self.use_chat_template,
+                max_batch_num_tokens=max_tokens,
+                shuffle=shuffle,
+            )
+            return DataLoader(
+                ds,
+                batch_sampler=sampler,
+                num_workers=self.num_workers,
+                collate_fn=lambda batch: self._tokenize_batch(batch),
+                pin_memory=True,
+                persistent_workers=(self.num_workers > 0),
+            )
+        else:
+            sampler = None
+            use_shuffle = shuffle
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                sampler = DistributedSampler(ds, shuffle=shuffle)
+                use_shuffle = False
+            return DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=use_shuffle,
+                sampler=sampler,
+                num_workers=self.num_workers,
+                collate_fn=lambda batch: self._tokenize_batch(batch),
+                pin_memory=True,
+                persistent_workers=(self.num_workers > 0),
+            )

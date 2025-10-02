@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Dict, Any, List, Optional
 
 import torch
@@ -42,10 +43,14 @@ class HFModel:
             "float32": torch.float32,
             "fp32": torch.float32,
         }[gen_cfg.dtype]
+        # Use device_map="auto" for inference-only single-process runs.
+        # In distributed training (e.g., Accelerate/DDP), avoid device_map and let the trainer place/shard.
+        in_dist = os.environ.get("LOCAL_RANK") is not None or os.environ.get("RANK") is not None
+        device_map = None if in_dist else "auto"
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=torch_dtype,
-            device_map="auto",
+            device_map=device_map,
             trust_remote_code=True,
             attn_implementation=gen_cfg.attn_impl,
             low_cpu_mem_usage=True,
