@@ -33,6 +33,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         family: str,
         round_idx: int,
         cls_model: Optional[str] = None,
+        run_root: Optional[Any] = None,
     ) -> None:
         # For non-verifiable datasets, set up a reward model for scoring
         if dataset in {"TLDR", "IMDBGen"}:
@@ -41,18 +42,18 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
             device = 0 if torch.cuda.is_available() else -1
             self._reward = RewardScorer(
                 rm_model,
-                bt_sampling=bool(cfg.common.bt_sampling),
-                bt_beta=float(cfg.common.bt_beta),
+                bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
+                bt_beta=float(cfg.data_collection.bradley_terry_beta),
                 device=device,
-                dtype=str(cfg.common.dtype),
-                batch_size=int(cfg.collection.reward_batch_size),
+                dtype=str(cfg.system.dtype),
+                batch_size=int(cfg.data_collection.reward_batch_size),
             )
 
         snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
-            self.algo_key, dataset, family, round_idx
+            self.algo_key, dataset, family, round_idx, run_root=run_root
         )
 
-        random.seed(int(cfg.collection.seed))
+        random.seed(int(cfg.data_collection.seed))
         # Build generator model: round 1 uses ref-only, later rounds can use guided
         ref_hf = self._build_model(cfg, ref_model)
 
@@ -67,11 +68,12 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
                 num_atoms=int(self.cfg.num_atoms),
                 V_min=float(self.cfg.V_min),
                 V_max=float(self.cfg.V_max),
-                attn_impl=str(cfg.common.attn_impl),
-                dtype=str(cfg.common.amp_dtype),
-                gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
+                attn_impl=str(cfg.system.attn_impl),
+                dtype=str(cfg.system.amp_dtype),
+                gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
             )
-            run_root = get_run_root()
+            if run_root is None:
+                run_root = get_run_root()
             ckpt_loaded = self.maybe_load_classifier_from_prev_round(
                 prev_classifier,
                 run_root=run_root,
@@ -93,10 +95,10 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         self._dataset = ds
         gen_cfg = model.gen_cfg
 
-        samples_per_example = int(cfg.collection.samples_per_example)
+        samples_per_example = int(cfg.data_collection.samples_per_example)
 
         records: List[Dict[str, Any]] = []
-        max_examples = int(cfg.collection.max_examples or 0)
+        max_examples = int(cfg.data_collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
         for ex in tqdm(
             islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
@@ -186,11 +188,15 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         family: str,
         output_dir,
         round_idx: int,
+        run_root: Optional[Any] = None,
     ) -> Dict[str, Any]:
         logger.info("🚀 QSharp start: dataset={} family={}", dataset, family)
 
-        run_root = get_run_root()
-        _, hf_dir, _ = get_snapshot_paths(self.algo_key, dataset, family, round_idx)
+        if run_root is None:
+            run_root = get_run_root()
+        _, hf_dir, _ = get_snapshot_paths(
+            self.algo_key, dataset, family, round_idx, run_root=run_root
+        )
         if not hf_dir.exists():
             raise FileNotFoundError(f"Missing QSharp dataset: {hf_dir}")
         ds = load_from_disk(str(hf_dir))
@@ -206,9 +212,9 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
             num_atoms=int(self.cfg.num_atoms),
             V_min=float(self.cfg.V_min),
             V_max=float(self.cfg.V_max),
-            attn_impl=str(cfg.common.attn_impl),
-            dtype=str(cfg.common.amp_dtype),
-            gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
+            attn_impl=str(cfg.system.attn_impl),
+            dtype=str(cfg.system.amp_dtype),
+            gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
         )
         self.maybe_load_classifier_from_prev_round(
             classifier,
@@ -228,9 +234,9 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
             weight_decay=float(self.cfg.weight_decay),
             grad_clip=float(self.cfg.grad_clip),
             pad_token_id=ref.pad_token_id,
-            micro_batch_size=int(cfg.common.micro_batch_size),
-            amp_dtype=str(cfg.common.amp_dtype),
-            clear_cache_interval=int(cfg.common.clear_cache_interval),
+            micro_batch_size=int(cfg.training.micro_batch_size),
+            amp_dtype=str(cfg.system.amp_dtype),
+            clear_cache_interval=int(cfg.system.clear_cache_interval),
         )
         # Convert dataset rows to classifier training examples if needed
         # Expecting keys: input_ids, target_ids, rewards, loss_weights
@@ -252,7 +258,14 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         torch.save(classifier.state_dict(), str(ckpt_dir / "classifier.pt"))
 
-        # Reload classifier for eval to mirror DPO pattern
+        # Free memory before loading for evaluation
+        logger.info("🧹 Clearing trainer, loader, and classifier before evaluation...")
+        del trainer, loader, ds, classifier
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # Reload classifier from checkpoint for evaluation
         reloaded = ValueClassifier(
             cls_model,
             tokenizer=ref.tokenizer,
@@ -261,9 +274,9 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
             num_atoms=int(self.cfg.num_atoms),
             V_min=float(self.cfg.V_min),
             V_max=float(self.cfg.V_max),
-            attn_impl=str(cfg.common.attn_impl),
-            dtype=str(cfg.common.amp_dtype),
-            gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
+            attn_impl=str(cfg.system.attn_impl),
+            dtype=str(cfg.system.amp_dtype),
+            gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
         )
         state = torch.load(
             str(ckpt_dir / "classifier.pt"), map_location=ref.model.device
@@ -298,6 +311,9 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
                         cfg, guided, eval_ds, ref_model=ref, save_dir=save_dir
                     )
                 by_eta[str(guided.guidance.eta)] = metrics
+                # Clear memory after each evaluation to prevent fragmentation
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             eval_map[eval_ds] = by_eta
 
         primary_eta = float(
@@ -344,6 +360,13 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
                 float(primary_metrics.get("pass@1", 0.0) or 0.0),
                 float(primary_metrics.get("maj@8", 0.0) or 0.0),
             )
+
+        # Cleanup models to free memory
+        # Note: classifier was already deleted earlier, only cleanup remaining models
+        del ref, reloaded, guided
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return result
 
     def score_samples(

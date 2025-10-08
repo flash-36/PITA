@@ -27,17 +27,18 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
         family: str,
         round_idx: int,
         cls_model: Optional[str] = None,
+        run_root: Optional[Any] = None,
     ) -> None:
         ds_cfg = cfg.datasets[dataset]
         rm_model = str(ds_cfg.reward_model)
         device = 0 if torch.cuda.is_available() else -1
         self._reward = RewardScorer(
             rm_model,
-            bt_sampling=bool(cfg.common.bt_sampling),
-            bt_beta=float(cfg.common.bt_beta),
+            bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
+            bt_beta=float(cfg.data_collection.bradley_terry_beta),
             device=device,
-            dtype=str(cfg.common.dtype),
-            batch_size=int(cfg.collection.reward_batch_size),
+            dtype=str(cfg.system.dtype),
+            batch_size=int(cfg.data_collection.reward_batch_size),
         )
         return super().generate_data(
             cfg=cfg,
@@ -46,6 +47,7 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             family=family,
             round_idx=round_idx,
             cls_model=cls_model,
+            run_root=run_root,
         )
 
     def resolve_ref_for_round(
@@ -67,11 +69,15 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
         family: str,
         output_dir,
         round_idx: int,
+        run_root: Optional[Any] = None,
     ) -> Dict[str, Any]:
         logger.info("🚀 PITA start: dataset={} family={}", dataset, family)
 
-        run_root = get_run_root()
-        _, hf_dir, _ = get_snapshot_paths(self.algo_key, dataset, family, round_idx)
+        if run_root is None:
+            run_root = get_run_root()
+        _, hf_dir, _ = get_snapshot_paths(
+            self.algo_key, dataset, family, round_idx, run_root=run_root
+        )
         if not hf_dir.exists():
             raise FileNotFoundError(f"Missing PITA dataset: {hf_dir}")
         ds = load_from_disk(str(hf_dir))
@@ -85,9 +91,9 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             num_atoms=int(self.cfg.num_atoms),
             V_min=float(self.cfg.V_min),
             V_max=float(self.cfg.V_max),
-            attn_impl=str(cfg.common.attn_impl),
-            dtype=str(cfg.common.amp_dtype),
-            gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
+            attn_impl=str(cfg.system.attn_impl),
+            dtype=str(cfg.system.amp_dtype),
+            gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
         )
         self.maybe_load_classifier_from_prev_round(
             classifier,
@@ -107,9 +113,9 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             weight_decay=float(self.cfg.weight_decay),
             grad_clip=float(self.cfg.grad_clip),
             pad_token_id=ref.pad_token_id,
-            micro_batch_size=int(cfg.common.micro_batch_size),
-            amp_dtype=str(cfg.common.amp_dtype),
-            clear_cache_interval=int(cfg.common.clear_cache_interval),
+            micro_batch_size=int(cfg.training.micro_batch_size),
+            amp_dtype=str(cfg.system.amp_dtype),
+            clear_cache_interval=int(cfg.system.clear_cache_interval),
         )
         sample = ds[0] if len(ds) > 0 else None
         need_convert = sample is not None and not all(
@@ -130,6 +136,14 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         torch.save(classifier.state_dict(), str(ckpt_dir / "classifier.pt"))
 
+        # Free memory before loading for evaluation
+        logger.info("🧹 Clearing trainer, loader, and classifier before evaluation...")
+        del trainer, loader, ds, classifier
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # Reload classifier from checkpoint for evaluation
         reloaded = ValueClassifier(
             cls_model,
             tokenizer=ref.tokenizer,
@@ -138,9 +152,9 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             num_atoms=int(self.cfg.num_atoms),
             V_min=float(self.cfg.V_min),
             V_max=float(self.cfg.V_max),
-            attn_impl=str(cfg.common.attn_impl),
-            dtype=str(cfg.common.amp_dtype),
-            gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
+            attn_impl=str(cfg.system.attn_impl),
+            dtype=str(cfg.system.amp_dtype),
+            gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
         )
         state = torch.load(
             str(ckpt_dir / "classifier.pt"), map_location=ref.model.device
@@ -175,6 +189,9 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
                         cfg, guided, eval_ds, ref_model=ref, save_dir=save_dir
                     )
                 by_eta[str(guided.guidance.eta)] = metrics
+                # Clear memory after each evaluation to prevent fragmentation
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             eval_map[eval_ds] = by_eta
 
         # Primary metrics: use configured eta if present, otherwise the first eta
@@ -222,6 +239,13 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
                 float(primary_metrics.get("pass@1", 0.0) or 0.0),
                 float(primary_metrics.get("maj@8", 0.0) or 0.0),
             )
+
+        # Cleanup models to free memory
+        # Note: classifier was already deleted earlier, only cleanup remaining models
+        del ref, reloaded, guided
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return result
 
     def score_samples(

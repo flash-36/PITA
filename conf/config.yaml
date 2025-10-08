@@ -5,35 +5,46 @@ experiment:
   name: "???"
   seed: 42
 
-# Global/common hyperparams
-common:
-  max_new_tokens: 512
-  temperature: 0.8
-  top_p: 0.9
-  dtype: bfloat16
-  use_chat_template: true
-  bt_sampling: true
-  bt_beta: 1.0
-  attn_impl: eager
-  amp_dtype: bfloat16
-  micro_batch_size: 0
-  clear_cache_interval: 0
-  gradient_checkpointing: false
-
 # Number of iterative rounds: generate -> train -> regenerate -> train ...
 rounds_of_training: 2
 
-# Training/evaluation control
+# System configuration
+system:
+  dtype: bfloat16
+  amp_dtype: bfloat16
+  attn_impl: eager  # Use 'eager' (stable) or 'flash_attention_2' (faster, requires installation)
+  clear_cache_interval: 10  # Clear cache every N steps to prevent OOM
+
+# Generation hyperparameters
+generation:
+  max_new_tokens: 512
+  temperature: 0.8
+  top_p: 0.9
+  use_chat_template: true
+
+# Training hyperparameters
 training:
+  micro_batch_size: 4  # Micro-batching for gradient accumulation (helps with memory)
+  gradient_checkpointing: true  # Enable to save memory at cost of speed
   # Which datasets to train on
   datasets:
     - GSM8K
-    - TLDR
+    # - TLDR
     - IMDBGen
 
+# Data collection hyperparameters
+data_collection:
+  samples_per_example: 4
+  seed: 42
+  max_examples: 32
+  reward_batch_size: 32  # Increased from 2 to 32 for better GPU utilization
+  bradley_terry_sampling: true
+  bradley_terry_beta: 1.0
+
+# Evaluation configuration
 evaluation:
   # Evaluate guided decoding at multiple eta values
-  etas: [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+  etas: [0.25] #, 0.5, 1.0, 2.0, 4.0, 8.0]
   # For each training dataset, which datasets to evaluate on
   datasets_by_train:
     GSM8K:
@@ -45,19 +56,48 @@ evaluation:
     IMDBGen:
       - IMDBGen
 
-# Data collection hyperparams
-collection:
-  samples_per_example: 4
-  seed: 42
-  max_examples: 1
-  reward_batch_size: 2
-
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
+# Parallel execution settings
+parallel_generation: true  # Enable parallel data generation across GPUs
+use_parallel_execution: true  # Enable parallel job execution
+
 algos:
-  # PITA:
+  PITA:
+    epochs: 3
+    batch_size: 24  # Increased from 16 (adjust based on GPU memory)
+    num_workers: 4  # Increased from 2 for faster data loading
+    lr: 2.0e-5
+    weight_decay: 0.0
+    grad_clip: 1.0
+    loss_type: bce
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
+    guidance:
+      eta: 1.0
+      mode: expectation
+      top_k: 20
+      use_cache: false
+  QSharp:
+    epochs: 3
+    batch_size: 24  # Increased from 16
+    num_workers: 4  # Increased from 2
+    lr: 2.0e-5
+    weight_decay: 0.0
+    grad_clip: 1.0
+    loss_type: bce
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
+    guidance:
+      eta: 1.0
+      mode: bernoulli
+      top_k: 20
+      use_cache: false
+  # QSharpHF:
   #   epochs: 3
-  #   batch_size: 16
-  #   num_workers: 2
+  #   batch_size: 24  # Increased from 16
+  #   num_workers: 4  # Increased from 2
   #   lr: 2.0e-5
   #   weight_decay: 0.0
   #   grad_clip: 1.0
@@ -70,32 +110,14 @@ algos:
   #     mode: expectation
   #     top_k: 20
   #     use_cache: false
-  # QSharp:
-  #   epochs: 3
-  #   batch_size: 16
-  #   num_workers: 2
+  # DPO:
+  #   beta: 0.1
   #   lr: 2.0e-5
   #   weight_decay: 0.0
+  #   epochs: 5
   #   grad_clip: 1.0
-  #   loss_type: bce
-  #   num_atoms: 11
-  #   V_min: 0.0
-  #   V_max: 1.0
-  #   guidance:
-  #     eta: 1.0
-  #     mode: bernoulli
-  #     top_k: 20
-  #     use_cache: false
-  # # QSharpHF: {}
-  DPO:
-    bt_beta: 1.0
-    beta: 0.1
-    lr: 2.0e-5
-    weight_decay: 0.0
-    epochs: 5
-    grad_clip: 1.0
-    batch_size: 8
-    num_workers: 2
+  #   batch_size: 16  # Increased from 8
+  #   num_workers: 4  # Increased from 2
   # GRPO:
   #   samples_per_prompt: 4
   #   kl_coef: 0.05
@@ -103,28 +125,28 @@ algos:
   #   weight_decay: 0.0
   #   epochs: 5
   #   grad_clip: 1.0
-  #   batch_size: 8
-  #   num_workers: 2
-  GRPO-HF:
-    samples_per_prompt: 4
-    kl_coef: 0.05
-    lr: 2.0e-5
-    cls_lr: 2.0e-5
-    weight_decay: 0.0
-    epochs: 5
-    cls_epochs: 3
-    grad_clip: 1.0
-    batch_size: 8
-    num_workers: 2
-    loss_type: bce
-    num_atoms: 11
-    V_min: 0.0
-    V_max: 1.0
+  #   batch_size: 16  # Increased from 8
+  #   num_workers: 4  # Increased from 2
+  # GRPO-HF:
+  #   samples_per_prompt: 4
+  #   kl_coef: 0.05
+  #   lr: 2.0e-5
+  #   cls_lr: 2.0e-5
+  #   weight_decay: 0.0
+  #   epochs: 5
+  #   cls_epochs: 3
+  #   grad_clip: 1.0
+  #   batch_size: 16  # Increased from 8
+  #   num_workers: 4  # Increased from 2
+  #   loss_type: bce
+  #   num_atoms: 11
+  #   V_min: 0.0
+  #   V_max: 1.0
   # BEST_OF_N: {}
 
 # Model pairs; map of ref -> classifier
 model_pairs:
-  # - gemma
+  - gemma
   - llama
   # - phi
   # - gpt
@@ -179,5 +201,10 @@ hydra:
   sweep:
     dir: multirun/${now:%Y-%m-%d}/${experiment.name}-${now:%H-%M-%S}
     subdir: ${hydra.job.num}
-
- 
+  # Disable Hydra's automatic logging since we use our own logger
+  job_logging:
+    disable_existing_loggers: false
+    handlers:
+      file:
+        # Redirect to same file as our manual logger
+        filename: ${hydra.runtime.output_dir}/run.log

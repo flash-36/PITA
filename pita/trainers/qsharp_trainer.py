@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, Any, List
+import os
 
 import torch
 from torch.utils.data import DataLoader
@@ -56,14 +57,20 @@ class QSharpTrainer:
         self.clear_cache_interval = int(clear_cache_interval)
 
     def create_loader(self, ds) -> DataLoader:
+        # In parallel mode, disable workers to avoid CUDA IPC issues
+        # Each job already has dedicated GPU resources
+        num_workers = (
+            0 if os.environ.get("PITA_PARALLEL_MODE") == "1" else self.num_workers
+        )
+
         return DataLoader(
             ds,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=self.num_workers,
+            num_workers=num_workers,
             collate_fn=self._collate,
             pin_memory=True,
-            persistent_workers=(self.num_workers > 0),
+            persistent_workers=False,  # Avoid CUDA tensor sharing issues
         )
 
     def _collate(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:

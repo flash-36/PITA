@@ -1,3 +1,5 @@
+"""Parallel evaluation across multiple GPUs with batched processing."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -6,10 +8,10 @@ from pathlib import Path
 
 from omegaconf import DictConfig
 from datasets import Dataset
-from tqdm import tqdm
 from itertools import islice
 import torch
 import torch.nn.functional as F
+from loguru import logger
 
 from pita.models.hf import HFModel
 from pita.models.guided import GuidedHFModel
@@ -18,20 +20,14 @@ from pita.core.io import ensure_dir
 from pita.core.prompts import build_instruction_prompt
 from pita.datasets.utils import extract_final_answer
 from pita.datasets import build_test_dataset
+from pita.core.gpu_manager import get_gpu_manager
 
 
 @torch.inference_mode()
 def _kl_divergence(
     policy_logits: torch.Tensor, ref_logits: torch.Tensor
 ) -> torch.Tensor:
-    """Compute token-wise KL(policy || ref) along last dimension.
-
-    Shapes:
-      policy_logits: [*, V]
-      ref_logits:    [*, V]
-    Returns:
-      kl:            [*]
-    """
+    """Compute token-wise KL(policy || ref) along last dimension."""
     p_logprob = F.log_softmax(policy_logits, dim=-1)
     q_logprob = F.log_softmax(ref_logits, dim=-1)
     p_prob = p_logprob.exp()
@@ -46,13 +42,7 @@ def _compute_traj_kl_for_text(
     prompt_text: str,
     continuation_text: str,
 ) -> float:
-    """Compute trajectory KL(policy || ref) over the continuation tokens for a single example.
-
-    If policy is a GuidedHFModel, the policy distribution is obtained by applying its
-    logits processor step-wise to the reference model logits. Otherwise, the policy
-    logits are taken from the policy HFModel forward pass.
-    """
-    # Resolve reference model
+    """Compute trajectory KL(policy || ref) over the continuation tokens."""
     if isinstance(policy, GuidedHFModel):
         ref_model: HFModel = policy.ref
     else:
@@ -74,27 +64,23 @@ def _compute_traj_kl_for_text(
         getattr(tok, "pad_token_id", tok.eos_token_id)
     ).long()
 
-    # Forward through reference once to get base logits at each position
     ref_out = ref_model.model(
         input_ids=concat_input_ids,
         attention_mask=attention_mask,
         use_cache=False,
     )
-    # Slice logits corresponding to predicting continuation tokens
     prompt_len = ids_prompt["input_ids"].shape[1]
     ref_logits_steps = ref_out.logits[:, prompt_len - 1 : -1, :]
 
     if ref_logits_steps.numel() == 0:
         return 0.0
 
-    # Build policy logits across steps
     if isinstance(policy, GuidedHFModel):
         proc = policy._build_processor()
         policy._reset_state(proc)
         kl_sum = 0.0
         steps = ref_logits_steps.shape[1]
         for t in range(steps):
-            # Prefix up to current step (position indexing aligns with logits index)
             prefix_len = prompt_len + t
             prefix_ids = concat_input_ids[:, :prefix_len]
             base_scores = ref_logits_steps[:, t, :]
@@ -103,7 +89,6 @@ def _compute_traj_kl_for_text(
             kl_sum += float(kl_t.item())
         return kl_sum
     else:
-        # Policy is a plain HFModel
         policy_model: HFModel = policy
         pol_out = policy_model.model(
             input_ids=concat_input_ids,
@@ -111,18 +96,28 @@ def _compute_traj_kl_for_text(
             use_cache=False,
         )
         pol_logits_steps = pol_out.logits[:, prompt_len - 1 : -1, :]
-        # Token-wise KL then sum over continuation
         kl_steps = _kl_divergence(pol_logits_steps, ref_logits_steps)
         return float(kl_steps.sum().item())
 
 
-def evaluate_pass1_maj8(
+def evaluate_pass1_maj8_batched(
     cfg: DictConfig,
     model: HFModel,
     dataset: str,
     ref_model: Optional[HFModel] = None,
     save_dir: Optional[Path] = None,
+    batch_size: int = 8,
 ) -> Dict[str, float]:
+    """Evaluate pass@1 and maj@8 with batched generation.
+
+    Args:
+        cfg: Configuration
+        model: Model to evaluate
+        dataset: Dataset name
+        ref_model: Reference model for KL computation
+        save_dir: Directory to save results
+        batch_size: Batch size for generation (number of examples to process at once)
+    """
     ds = build_test_dataset(cfg, dataset)
     if ds is None:
         return {}
@@ -136,13 +131,21 @@ def evaluate_pass1_maj8(
     sum_kl = 0.0
     has_verifier = hasattr(ds, "is_correct")
     rows: List[Dict[str, str]] = []
-    for ex in tqdm(islice(ds.iter(), limit), total=limit, desc=f"Eval:{dataset}"):
+
+    # Collect examples into batches
+    examples = list(islice(ds.iter(), limit))
+
+    from tqdm import tqdm
+
+    for ex in tqdm(examples, desc=f"Eval:{dataset}"):
         prompt = ds.hydrate_prompt(ex.question)
         built = build_instruction_prompt(
             prompt,
             tokenizer=model.tokenizer,
             use_chat_template=model.gen_cfg.use_chat_template,
         )
+
+        # Generate 8 samples
         preds: List[str] = model.generate_n(built, 8)
 
         if has_verifier and ds.is_correct(ex.answer, preds[0]):
@@ -160,7 +163,7 @@ def evaluate_pass1_maj8(
 
         total += 1
 
-        # KL over the first sample continuation
+        # KL computation
         try:
             sum_kl += _compute_traj_kl_for_text(
                 model,
@@ -193,27 +196,39 @@ def evaluate_pass1_maj8(
     }
 
 
-def evaluate_avg_reward(
+def evaluate_avg_reward_batched(
     cfg: DictConfig,
     model: HFModel,
     dataset: str,
     ref_model: Optional[HFModel] = None,
     save_dir: Optional[Path] = None,
+    batch_size: int = 8,
 ) -> Dict[str, float]:
+    """Evaluate average reward with batched processing.
+
+    Args:
+        cfg: Configuration
+        model: Model to evaluate
+        dataset: Dataset name
+        ref_model: Reference model for KL computation
+        save_dir: Directory to save results
+        batch_size: Batch size for reward scoring
+    """
     ds = build_test_dataset(cfg, dataset)
     if ds is None:
         return {}
 
-    # Reward model setup
+    # Reward model setup with larger batch size
     ds_cfg = cfg.datasets[dataset]
     rm_model = str(ds_cfg.reward_model)
+    reward_batch_size = max(batch_size, 32)
     scorer = RewardScorer(
         rm_model,
         bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
         bt_beta=float(cfg.data_collection.bradley_terry_beta),
         device="auto",
         dtype=str(cfg.system.dtype),
-        batch_size=int(cfg.data_collection.reward_batch_size),
+        batch_size=reward_batch_size,
     )
 
     max_examples = int(cfg.data_collection.max_examples or 0)
@@ -223,6 +238,9 @@ def evaluate_avg_reward(
     sum_reward = 0.0
     sum_kl = 0.0
     rows: List[Dict[str, str]] = []
+
+    from tqdm import tqdm
+
     for ex in tqdm(islice(ds.iter(), limit), total=limit, desc=f"EvalR:{dataset}"):
         prompt = ds.hydrate_prompt(ex.question)
         built = build_instruction_prompt(
@@ -230,18 +248,14 @@ def evaluate_avg_reward(
             tokenizer=model.tokenizer,
             use_chat_template=model.gen_cfg.use_chat_template,
         )
-        # Generate a single continuation for reward evaluation
         pred: str = model.continue_from_context(
             built, max_new_tokens=model.gen_cfg.max_new_tokens, greedy=False
         )
 
-        # Score using reward model on (original question, generated text)
-        # Use the original question, not the hydrated prompt
-        r = float(scorer.score_single(ex.question, pred))  # type: ignore[attr-defined]
+        r = float(scorer.score_single(ex.question, pred))
         sum_reward += r
         total += 1
 
-        # KL over the produced continuation
         try:
             sum_kl += _compute_traj_kl_for_text(
                 model,
@@ -273,3 +287,37 @@ def evaluate_avg_reward(
         "avg_kl": float(sum_kl / max(1, total)),
         "num_examples": int(total),
     }
+
+
+def evaluate_parallel(
+    cfg: DictConfig,
+    model: HFModel,
+    dataset: str,
+    ref_model: Optional[HFModel] = None,
+    save_dir: Optional[Path] = None,
+    use_reward: bool = False,
+) -> Dict[str, float]:
+    """Automatically select evaluation method based on GPU availability.
+
+    Uses batched evaluation with optimized batch sizes based on GPU memory.
+    """
+    gpu_manager = get_gpu_manager()
+
+    # Determine optimal batch size based on GPU memory
+    if gpu_manager.num_gpus > 0:
+        # For 80GB GPUs, use larger batches; for 40GB, use smaller
+        total_memory = gpu_manager.get_gpu_memory(0) / (1024**3)  # GB
+        batch_size = 16 if total_memory >= 60 else 8
+    else:
+        batch_size = 4
+
+    logger.info(f"Using batch size {batch_size} for evaluation on {dataset}")
+
+    if use_reward:
+        return evaluate_avg_reward_batched(
+            cfg, model, dataset, ref_model, save_dir, batch_size
+        )
+    else:
+        return evaluate_pass1_maj8_batched(
+            cfg, model, dataset, ref_model, save_dir, batch_size
+        )

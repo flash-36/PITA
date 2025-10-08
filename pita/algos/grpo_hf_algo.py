@@ -36,12 +36,13 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
         family: str,
         round_idx: int,
         cls_model: Optional[str] = None,
+        run_root: Optional[Any] = None,
     ) -> None:
         snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
-            self.algo_key, dataset, family, round_idx
+            self.algo_key, dataset, family, round_idx, run_root=run_root
         )
 
-        random.seed(int(cfg.collection.seed))
+        random.seed(int(cfg.data_collection.seed))
         model = self._build_model(cfg, ref_model)
         ds = self._build_dataset(cfg, dataset)
         gen_cfg = model.gen_cfg
@@ -52,15 +53,15 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
         self._reward = RewardScorer(
             rm_model,
             bt_sampling=False,
-            bt_beta=float(cfg.common.bt_beta),
+            bt_beta=float(cfg.data_collection.bradley_terry_beta),
             device=device,
-            dtype=str(cfg.common.dtype),
-            batch_size=int(cfg.collection.reward_batch_size),
+            dtype=str(cfg.system.dtype),
+            batch_size=int(cfg.data_collection.reward_batch_size),
         )
 
         samples_per_prompt = int(self.cfg.samples_per_prompt)
         records: List[Dict[str, Any]] = []
-        max_examples = int(cfg.collection.max_examples or 0)
+        max_examples = int(cfg.data_collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
 
         for ex in tqdm(
@@ -113,6 +114,7 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
         family: str,
         output_dir,
         round_idx: int,
+        run_root: Optional[Any] = None,
     ) -> Dict[str, Any]:
         logger.info(
             "🎯 GRPO-HF start: dataset={} family={}",
@@ -120,8 +122,11 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
             family,
         )
 
-        run_root = get_run_root()
-        _, hf_dir, _ = get_snapshot_paths(self.algo_key, dataset, family, round_idx)
+        if run_root is None:
+            run_root = get_run_root()
+        _, hf_dir, _ = get_snapshot_paths(
+            self.algo_key, dataset, family, round_idx, run_root=run_root
+        )
         if not hf_dir.exists():
             raise FileNotFoundError(f"Missing GRPO-HF dataset: {hf_dir}")
 
@@ -135,9 +140,9 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
             num_atoms=int(self.cfg.num_atoms),
             V_min=float(self.cfg.V_min),
             V_max=float(self.cfg.V_max),
-            attn_impl=str(cfg.common.attn_impl),
-            dtype=str(cfg.common.amp_dtype),
-            gradient_checkpointing=bool(cfg.common.gradient_checkpointing),
+            attn_impl=str(cfg.system.attn_impl),
+            dtype=str(cfg.system.amp_dtype),
+            gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
         )
 
         prev_classifier_loaded = self.maybe_load_classifier_from_prev_round(
@@ -158,9 +163,9 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
             weight_decay=float(self.cfg.weight_decay),
             grad_clip=float(self.cfg.grad_clip),
             pad_token_id=int(ref.pad_token_id),
-            micro_batch_size=int(cfg.common.micro_batch_size),
-            amp_dtype=str(cfg.common.amp_dtype),
-            clear_cache_interval=int(cfg.common.clear_cache_interval),
+            micro_batch_size=int(cfg.training.micro_batch_size),
+            amp_dtype=str(cfg.system.amp_dtype),
+            clear_cache_interval=int(cfg.system.clear_cache_interval),
         )
 
         from datasets import load_from_disk
@@ -182,6 +187,11 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
         logger.info("💪 Re-scoring samples with proxy reward model...")
         grpo_ds = self._rescore_samples_with_proxy(ds_raw, classifier, ref)
 
+        # Free up memory before loading policy and reference models
+        logger.info("🧹 Clearing classifier and ref model to free memory...")
+        del classifier, ref, cls_trainer, cls_loader, ds_raw, ds_converted
+        torch.cuda.empty_cache()
+
         logger.info("🏋️ Training policy with GRPO...")
         policy = self._build_model(cfg, ref_model)
         reference = self._build_model(cfg, ref_model)
@@ -190,10 +200,10 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
             policy=policy,
             reference=reference,
             grpo_cfg=self.cfg,
-            use_chat_template=bool(cfg.common.use_chat_template),
-            micro_batch_size=int(cfg.common.micro_batch_size),
-            amp_dtype=str(cfg.common.amp_dtype),
-            clear_cache_interval=int(cfg.common.clear_cache_interval),
+            use_chat_template=bool(cfg.generation.use_chat_template),
+            micro_batch_size=int(cfg.training.micro_batch_size),
+            amp_dtype=str(cfg.system.amp_dtype),
+            clear_cache_interval=int(cfg.system.clear_cache_interval),
         )
 
         loader = trainer.create_loader(grpo_ds, shuffle=True)
@@ -239,6 +249,8 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
                 )
             eval_map[eval_ds] = metrics
             logger.info(f"✓ {eval_ds} metrics: {metrics}")
+            # Also clear after evaluation to release memory
+            torch.cuda.empty_cache()
 
         primary_metrics = eval_map.get(dataset) or (
             next(iter(eval_map.values())) if eval_map else {}
@@ -281,6 +293,12 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
                 float(stats.get("avg_kl", 0.0) or 0.0),
                 float(cls_stats.get("loss", 0.0) or 0.0),
             )
+
+        # Cleanup models to free memory
+        del reference, eval_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return result
 
     def _rescore_samples_with_proxy(

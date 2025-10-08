@@ -30,9 +30,14 @@ def get_run_root() -> Path:
 
 
 def get_snapshot_paths(
-    algo_key: str, dataset: str, family: str, round_idx: int
+    algo_key: str,
+    dataset: str,
+    family: str,
+    round_idx: int,
+    run_root: Optional[Path] = None,
 ) -> Tuple[Optional[Path], Path, Path]:
-    run_root = get_run_root()
+    if run_root is None:
+        run_root = get_run_root()
     ds_root = run_root / "datasets" / str(algo_key)
     ds_root.mkdir(parents=True, exist_ok=True)
     family_cap = str(family).capitalize()

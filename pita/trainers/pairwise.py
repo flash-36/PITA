@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Iterator
+import os
 
 import torch
-from torch.utils.data import Dataset as TorchDataset, DataLoader, Sampler, BatchSampler, DistributedSampler
+from torch.utils.data import (
+    Dataset as TorchDataset,
+    DataLoader,
+    Sampler,
+    BatchSampler,
+    DistributedSampler,
+)
 from transformers import PreTrainedTokenizerBase
 from pita.core.prompts import build_instruction_prompt
 import random
@@ -59,12 +66,20 @@ class PairwiseTrainerBase:
         def _estimate_tokens(self, idx: int) -> int:
             ex = self.dataset[int(idx)]
             prompt = build_instruction_prompt(
-                ex.prompt, tokenizer=self.tokenizer, use_chat_template=self.use_chat_template
+                ex.prompt,
+                tokenizer=self.tokenizer,
+                use_chat_template=self.use_chat_template,
             )
             # Estimate by token length of prompt+max(chosen,rejected)
-            p_ids = self.tokenizer(prompt, add_special_tokens=False).get("input_ids", [])
-            c_ids = self.tokenizer(ex.chosen, add_special_tokens=False).get("input_ids", [])
-            r_ids = self.tokenizer(ex.rejected, add_special_tokens=False).get("input_ids", [])
+            p_ids = self.tokenizer(prompt, add_special_tokens=False).get(
+                "input_ids", []
+            )
+            c_ids = self.tokenizer(ex.chosen, add_special_tokens=False).get(
+                "input_ids", []
+            )
+            r_ids = self.tokenizer(ex.rejected, add_special_tokens=False).get(
+                "input_ids", []
+            )
             resp_len = max(len(c_ids), len(r_ids))
             return len(p_ids) + resp_len
 
@@ -203,7 +218,24 @@ class PairwiseTrainerBase:
         seq_logps = masked.sum(dim=-1)  # [B]
         return seq_logps
 
+    def _collate_wrapper(self, batch: List[Any]) -> Dict[str, torch.Tensor]:
+        """Wrapper method for collate_fn that can be pickled for multiprocessing."""
+        result = self._tokenize_batch(batch)
+        # Ensure tensors are on CPU to avoid CUDA IPC issues with multiprocessing
+        if self.num_workers > 0:
+            result = {
+                k: v.cpu() if isinstance(v, torch.Tensor) else v
+                for k, v in result.items()
+            }
+        return result
+
     def create_loader(self, ds: TorchDataset, shuffle: bool = True) -> DataLoader:
+        # In parallel mode, disable workers to avoid CUDA IPC issues
+        # Each job already has dedicated GPU resources
+        num_workers = (
+            0 if os.environ.get("PITA_PARALLEL_MODE") == "1" else self.num_workers
+        )
+
         max_tokens = int(getattr(self, "max_batch_num_tokens", -1) or -1)
         if max_tokens > 0:
             sampler = self.DynamicBatchSampler(
@@ -216,10 +248,10 @@ class PairwiseTrainerBase:
             return DataLoader(
                 ds,
                 batch_sampler=sampler,
-                num_workers=self.num_workers,
-                collate_fn=lambda batch: self._tokenize_batch(batch),
+                num_workers=num_workers,
+                collate_fn=self._collate_wrapper,
                 pin_memory=True,
-                persistent_workers=(self.num_workers > 0),
+                persistent_workers=False,  # Can't pickle model objects with weakrefs
             )
         else:
             sampler = None
@@ -232,8 +264,8 @@ class PairwiseTrainerBase:
                 batch_size=self.batch_size,
                 shuffle=use_shuffle,
                 sampler=sampler,
-                num_workers=self.num_workers,
-                collate_fn=lambda batch: self._tokenize_batch(batch),
+                num_workers=num_workers,
+                collate_fn=self._collate_wrapper,
                 pin_memory=True,
-                persistent_workers=(self.num_workers > 0),
+                persistent_workers=False,  # Can't pickle model objects with weakrefs
             )

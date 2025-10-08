@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from loguru import logger
+import torch
 
 from pita.trainers import DPOTrainer
 from pita.datasets import PreferencePairDataset
@@ -25,6 +26,7 @@ class DPOAlgorithm(PostTrainingAlgorithms):
         family: str,
         output_dir,
         round_idx: int,
+        run_root: Optional[Any] = None,
     ) -> Dict[str, Any]:
         logger.info(
             "DPO start: dataset={} family={}",
@@ -33,8 +35,11 @@ class DPOAlgorithm(PostTrainingAlgorithms):
         )
 
         # Load dataset
-        run_root = get_run_root()
-        _, hf_dir, _ = get_snapshot_paths(self.algo_key, dataset, family, round_idx)
+        if run_root is None:
+            run_root = get_run_root()
+        _, hf_dir, _ = get_snapshot_paths(
+            self.algo_key, dataset, family, round_idx, run_root=run_root
+        )
         if not hf_dir.exists():
             raise FileNotFoundError(f"Missing DPO dataset: {hf_dir}")
         ds = PreferencePairDataset(hf_dir)
@@ -46,11 +51,13 @@ class DPOAlgorithm(PostTrainingAlgorithms):
             policy=policy,
             reference=reference,
             dpo_cfg=self.cfg,
-            use_chat_template=bool(cfg.common.use_chat_template),
-            micro_batch_size=int(cfg.common.micro_batch_size),
-            amp_dtype=str(cfg.common.amp_dtype),
-            clear_cache_interval=int(cfg.common.clear_cache_interval),
-            grad_accumulation_steps=int(getattr(self.cfg, "gradient_accumulation_steps", 1) or 1),
+            use_chat_template=bool(cfg.generation.use_chat_template),
+            micro_batch_size=int(cfg.training.micro_batch_size),
+            amp_dtype=str(cfg.system.amp_dtype),
+            clear_cache_interval=int(cfg.system.clear_cache_interval),
+            grad_accumulation_steps=int(
+                getattr(self.cfg, "gradient_accumulation_steps", 1) or 1
+            ),
             warmup_steps=int(getattr(self.cfg, "warmup_steps", 0) or 0),
             save_dir=str(output_dir),
             ckpt_freq=int(getattr(self.cfg, "ckpt_freq", -1) or -1),
@@ -62,42 +69,48 @@ class DPOAlgorithm(PostTrainingAlgorithms):
 
         ckpt_dir = self.get_ckpt_dir(run_root, dataset, family, round_idx)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        # Sync and save only on main process, unwrapping the potentially wrapped model
-        if hasattr(trainer, "accelerator"):
-            trainer.accelerator.wait_for_everyone()
-        if getattr(trainer, "is_main_process", True):
-            try:
-                unwrapped = trainer.unwrap_policy()
-            except Exception:
-                unwrapped = trainer.policy
-            unwrapped.save_pretrained(str(ckpt_dir))
-            trainer.tokenizer.save_pretrained(str(ckpt_dir))
+        # Save model checkpoint
+        # DPOTrainer doesn't use accelerator, so we save directly
+        try:
+            unwrapped = trainer.unwrap_policy()
+        except Exception:
+            unwrapped = trainer.policy
+        unwrapped.save_pretrained(str(ckpt_dir))
+        trainer.tokenizer.save_pretrained(str(ckpt_dir))
 
         # Evaluate on one or more datasets using the trained policy
         eval_map: Dict[str, Dict[str, float]] = {}
-        if getattr(trainer, "is_main_process", True):
-            eval_model = self._build_model(cfg, str(ckpt_dir))
-            eval_targets = list(
-                getattr(cfg.evaluation.datasets_by_train, dataset, [dataset])
-            )
-            for eval_ds in eval_targets:
-                if eval_ds in {"TLDR", "IMDBGen"}:
-                    metrics = evaluate_avg_reward(
-                        cfg,
-                        eval_model,
-                        eval_ds,
-                        ref_model=reference,
-                        save_dir=output_dir / f"eval_{eval_ds}",
-                    )
-                else:
-                    metrics = evaluate_pass1_maj8(
-                        cfg,
-                        eval_model,
-                        eval_ds,
-                        ref_model=reference,
-                        save_dir=output_dir / f"eval_{eval_ds}",
-                    )
-                eval_map[eval_ds] = metrics
+        eval_model = self._build_model(cfg, str(ckpt_dir))
+        eval_targets = list(
+            getattr(cfg.evaluation.datasets_by_train, dataset, [dataset])
+        )
+        for eval_ds in eval_targets:
+            if eval_ds in {"TLDR", "IMDBGen"}:
+                metrics = evaluate_avg_reward(
+                    cfg,
+                    eval_model,
+                    eval_ds,
+                    ref_model=reference,
+                    save_dir=output_dir / f"eval_{eval_ds}",
+                )
+            else:
+                metrics = evaluate_pass1_maj8(
+                    cfg,
+                    eval_model,
+                    eval_ds,
+                    ref_model=reference,
+                    save_dir=output_dir / f"eval_{eval_ds}",
+                )
+            eval_map[eval_ds] = metrics
+            # Clear memory after each evaluation to prevent fragmentation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # Cleanup models to free memory
+        del policy, reference, trainer, eval_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         primary_metrics = eval_map.get(dataset) or (
             next(iter(eval_map.values())) if eval_map else {}
         )

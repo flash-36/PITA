@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, Any, List
+import os
 
 import torch
 from torch.optim import AdamW
@@ -101,10 +102,10 @@ class GRPOTrainer:
                 full = full[-max_length:]
                 mask = mask[-max_length:]
 
-            vocab_size = self.policy.config.vocab_size
-            full = [
-                tid if tid < vocab_size else self.tokenizer.unk_token_id for tid in full
-            ]
+            # Use tokenizer vocab_size instead of config (more portable across model types)
+            vocab_size = len(self.tokenizer)
+            unk_id = self.tokenizer.unk_token_id or 0
+            full = [tid if tid < vocab_size else unk_id for tid in full]
 
             full_inputs.append(full)
             response_masks.append(mask)
@@ -208,15 +209,32 @@ class GRPOTrainer:
 
         return {"loss": loss, "stats": stats}
 
+    def _collate_wrapper(self, batch):
+        """Wrapper method for collate_fn that can be pickled for multiprocessing."""
+        result = self._tokenize_batch(batch)
+        # Ensure tensors are on CPU to avoid CUDA IPC issues with multiprocessing
+        if self.num_workers > 0:
+            result = {
+                k: v.cpu() if isinstance(v, torch.Tensor) else v
+                for k, v in result.items()
+            }
+        return result
+
     def create_loader(self, ds, shuffle: bool = True) -> DataLoader:
+        # In parallel mode, disable workers to avoid CUDA IPC issues
+        # Each job already has dedicated GPU resources
+        num_workers = (
+            0 if os.environ.get("PITA_PARALLEL_MODE") == "1" else self.num_workers
+        )
+
         return DataLoader(
             ds,
             batch_size=self.batch_size,
             shuffle=shuffle,
-            num_workers=self.num_workers,
-            collate_fn=lambda batch: self._tokenize_batch(batch),
+            num_workers=num_workers,
+            collate_fn=self._collate_wrapper,
             pin_memory=True,
-            persistent_workers=(self.num_workers > 0),
+            persistent_workers=False,  # Can't pickle model objects
         )
 
     def train(self, loader: DataLoader, epochs: int = 1) -> Dict[str, Any]:

@@ -7,8 +7,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from torch.amp import autocast
-from accelerate import Accelerator
+from torch.amp import autocast, GradScaler
 
 from .pairwise import PairwiseTrainerBase
 from pita.models.hf import HFModel
@@ -70,25 +69,26 @@ class DPOTrainer(PairwiseTrainerBase):
             torch.bfloat16,
             torch.float16,
         )
+        self.scaler = GradScaler(
+            device="cuda",
+            enabled=self.autocast_enabled and self.amp_dtype == torch.float16,
+        )
         self.micro_batch_size = int(micro_batch_size)
         self.clear_cache_interval = int(clear_cache_interval)
         self.grad_accumulation_steps = int(
-            grad_accumulation_steps or getattr(self.cfg, "gradient_accumulation_steps", 1) or 1
+            grad_accumulation_steps
+            or getattr(self.cfg, "gradient_accumulation_steps", 1)
+            or 1
         )
         self.save_dir = str(save_dir) if save_dir else None
         self.ckpt_freq = int(ckpt_freq or getattr(self.cfg, "ckpt_freq", -1) or -1)
         self.eval_freq = int(eval_freq or getattr(self.cfg, "eval_freq", -1) or -1)
-        mp = (
-            "bf16"
-            if self.amp_dtype == torch.bfloat16
-            else ("fp16" if self.amp_dtype == torch.float16 else "no")
+        self.max_batch_num_tokens = int(
+            getattr(self.cfg, "max_batch_num_tokens", -1) or -1
         )
-        self.accelerator = Accelerator(mixed_precision=mp)
-        self.is_main_process = self.accelerator.is_main_process
-        self.max_batch_num_tokens = int(getattr(self.cfg, "max_batch_num_tokens", -1) or -1)
 
     def dpo_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
-        device = self.accelerator.device
+        device = self.policy.device
         # Move batch to device
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
 
@@ -160,21 +160,12 @@ class DPOTrainer(PairwiseTrainerBase):
         return {"loss": loss, "stats": stats}
 
     def train(self, loader: DataLoader, epochs: int = 1) -> Dict[str, Any]:
-        # For FSDP/DDP, prepare only the policy model (which we train) and optimizer
-        # Keep reference model on CPU or handle separately to avoid FSDP2 conflicts
-        self.policy, self.optimizer, loader = self.accelerator.prepare(
-            self.policy, self.optimizer, loader
-        )
-        # Move reference to same device as policy but don't wrap
-        self.reference = self.reference.to(self.accelerator.device)
         self.policy.train()
         steps = 0
         opt_steps = 0
         accum = {"loss": 0.0, "acc": 0.0}
         total_epochs = int(epochs)
-        epoch_bar = tqdm(
-            range(total_epochs), desc="DPO:epochs", disable=not self.is_main_process
-        )
+        epoch_bar = tqdm(range(total_epochs), desc="DPO:epochs")
         for e in epoch_bar:
             bs = getattr(loader, "batch_sampler", None)
             if hasattr(bs, "set_epoch"):
@@ -186,7 +177,6 @@ class DPOTrainer(PairwiseTrainerBase):
                 loader,
                 desc=f"DPO:epoch {e + 1}/{total_epochs}",
                 leave=False,
-                disable=not self.is_main_process,
             )
             for batch in batch_bar:
                 # Optional micro-batching at DPO step granularity
@@ -211,57 +201,63 @@ class DPOTrainer(PairwiseTrainerBase):
                     out = self.dpo_step(batch)
                     loss: torch.Tensor = out["loss"]
                     stats = out["stats"]
-                    self.accelerator.backward(loss)
+
+                    # Backward with gradient scaling
+                    if self.scaler.is_enabled():
+                        self.scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
+
                 # Gradient accumulation and step
                 if self.grad_accumulation_steps > 1:
                     should_step = (steps + 1) % self.grad_accumulation_steps == 0
                 else:
                     should_step = True
+
                 if should_step:
                     if self.cfg.grad_clip and self.cfg.grad_clip > 0:
-                        self.accelerator.clip_grad_norm_(
+                        if self.scaler.is_enabled():
+                            self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(
                             self.policy.parameters(), self.cfg.grad_clip
                         )
-                    self.optimizer.step()
+
+                    if self.scaler.is_enabled():
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
+
                     if self.scheduler is not None:
                         self.scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     opt_steps += 1
 
                 steps += 1
-                device = self.accelerator.device
-                gl = self.accelerator.gather(torch.tensor(stats["loss"], device=device)).mean().item()
-                ga = self.accelerator.gather(torch.tensor(stats["acc"], device=device)).mean().item()
-                accum["loss"] += gl
-                accum["acc"] += ga
-                if self.is_main_process:
-                    batch_bar.set_postfix(loss=gl, acc=ga) 
+                accum["loss"] += stats["loss"]
+                accum["acc"] += stats["acc"]
+                batch_bar.set_postfix(loss=stats["loss"], acc=stats["acc"])
                 if self.clear_cache_interval > 0 and (
                     steps % self.clear_cache_interval == 0
                 ):
                     torch.cuda.empty_cache()
                 # Periodic checkpoint
-                if self.save_dir and self.ckpt_freq > 0 and (opt_steps > 0) and (opt_steps % self.ckpt_freq == 0):
-                    try:
-                        unwrapped = self.unwrap_policy()
-                    except Exception:
-                        unwrapped = self.policy
-                    if self.is_main_process:
-                        from pathlib import Path
-                        ckpt_dir = Path(self.save_dir) / f"ckpt_{opt_steps}"
-                        ckpt_dir.mkdir(parents=True, exist_ok=True)
-                        unwrapped.save_pretrained(str(ckpt_dir))
-                        self.tokenizer.save_pretrained(str(ckpt_dir))
+                if (
+                    self.save_dir
+                    and self.ckpt_freq > 0
+                    and (opt_steps > 0)
+                    and (opt_steps % self.ckpt_freq == 0)
+                ):
+                    from pathlib import Path
+
+                    ckpt_dir = Path(self.save_dir) / f"ckpt_{opt_steps}"
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    self.policy.save_pretrained(str(ckpt_dir))
+                    self.tokenizer.save_pretrained(str(ckpt_dir))
 
             avg_loss = accum["loss"] / max(1, steps)
             avg_acc = accum["acc"] / max(1, steps)
-            if self.is_main_process:
-                epoch_bar.set_postfix(
-                    avg_loss=f"{avg_loss:.4f}", avg_acc=f"{avg_acc:.4f}"
-                )
+            epoch_bar.set_postfix(avg_loss=f"{avg_loss:.4f}", avg_acc=f"{avg_acc:.4f}")
 
         n = max(1, steps)
         return {"loss": accum["loss"] / n, "acc": accum["acc"] / n, "steps": steps}
-
-    def unwrap_policy(self):
-        return self.accelerator.unwrap_model(self.policy)
