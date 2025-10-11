@@ -21,6 +21,7 @@ from pita.core.prompts import build_instruction_prompt
 from pita.core.registry import register_algorithm
 from .base import PostTrainingAlgorithms
 from pita.core.io import get_run_root, get_snapshot_paths, merge_and_save_hf
+from pita.core.compute_tracker import get_compute_tracker, reset_compute_tracker
 from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
 
 
@@ -122,6 +123,9 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
             family,
         )
 
+        reset_compute_tracker()
+        tracker = get_compute_tracker()
+
         if run_root is None:
             run_root = get_run_root()
         _, hf_dir, _ = get_snapshot_paths(
@@ -132,11 +136,14 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
 
         logger.info("📚 Training proxy reward model...")
         ref = self._build_model(cfg, ref_model)
+
+        proxy_loss_type = str(self.cfg.proxy_loss_type)
+
         classifier = ValueClassifier(
             cls_model,
             tokenizer=ref.tokenizer,
             device=ref.model.device,
-            loss_type=str(self.cfg.loss_type),
+            loss_type=proxy_loss_type,
             num_atoms=int(self.cfg.num_atoms),
             V_min=float(self.cfg.V_min),
             V_max=float(self.cfg.V_max),
@@ -158,8 +165,9 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
             classifier,
             tokenizer=ref.tokenizer,
             batch_size=int(self.cfg.batch_size),
+            max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
             num_workers=int(self.cfg.num_workers),
-            lr=float(self.cfg.cls_lr),
+            lr=float(self.cfg.proxy_lr),
             weight_decay=float(self.cfg.weight_decay),
             grad_clip=float(self.cfg.grad_clip),
             pad_token_id=int(ref.pad_token_id),
@@ -178,7 +186,10 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
         )
 
         cls_loader = cls_trainer.create_loader(ds_converted)
-        cls_stats = cls_trainer.train(cls_loader, num_epochs=int(self.cfg.cls_epochs))
+        with tracker.track_phase(f"proxy_rm_training_{dataset}"):
+            cls_stats = cls_trainer.train(
+                cls_loader, num_epochs=int(self.cfg.proxy_epochs)
+            )
 
         ckpt_dir = self.get_ckpt_dir(run_root, dataset, family, round_idx)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -204,10 +215,12 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
             micro_batch_size=int(cfg.training.micro_batch_size),
             amp_dtype=str(cfg.system.amp_dtype),
             clear_cache_interval=int(cfg.system.clear_cache_interval),
+            max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
         )
 
         loader = trainer.create_loader(grpo_ds, shuffle=True)
-        stats = trainer.train(loader, epochs=int(self.cfg.epochs))
+        with tracker.track_phase(f"grpo_training_{dataset}"):
+            stats = trainer.train(loader, epochs=int(self.cfg.epochs))
 
         trainer.policy.eval()
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -256,6 +269,7 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
             next(iter(eval_map.values())) if eval_map else {}
         )
 
+        compute_metrics = tracker.get_metrics()
         result = {
             "algo": "GRPO-HF",
             "ref_model": ref_model,
@@ -270,6 +284,7 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
                 **primary_metrics,
             },
             "eval": eval_map,
+            "compute": compute_metrics,
         }
 
         if "avg_reward" in primary_metrics:

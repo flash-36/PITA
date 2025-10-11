@@ -13,6 +13,7 @@ from pita.core.registry import register_algorithm
 from .base import ValueGuidedAlgorithms
 from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
 from pita.core.io import get_run_root, get_snapshot_paths, merge_and_save_hf
+from pita.core.compute_tracker import get_compute_tracker, reset_compute_tracker
 from pita.trainers import QSharpTrainer
 from datasets import load_from_disk
 from pita.models.value_classifier import ValueClassifier
@@ -192,6 +193,9 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
     ) -> Dict[str, Any]:
         logger.info("🚀 QSharp start: dataset={} family={}", dataset, family)
 
+        reset_compute_tracker()
+        tracker = get_compute_tracker()
+
         if run_root is None:
             run_root = get_run_root()
         _, hf_dir, _ = get_snapshot_paths(
@@ -229,6 +233,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
             classifier=classifier,
             tokenizer=ref.tokenizer,
             batch_size=int(self.cfg.batch_size),
+            max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
             num_workers=int(self.cfg.num_workers),
             lr=float(self.cfg.lr),
             weight_decay=float(self.cfg.weight_decay),
@@ -252,7 +257,8 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
             )
 
         loader = trainer.create_loader(ds)
-        stats = trainer.train(loader, num_epochs=int(self.cfg.epochs))
+        with tracker.track_phase(f"training_{dataset}"):
+            stats = trainer.train(loader, num_epochs=int(self.cfg.epochs))
 
         ckpt_dir = self.get_ckpt_dir(run_root, dataset, family, round_idx)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -333,6 +339,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         else:
             primary_metrics = {}
 
+        compute_metrics = tracker.get_metrics()
         result = {
             "algo": "QSharp",
             "ref_model": ref_model,
@@ -344,6 +351,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
                 **primary_metrics,
             },
             "eval": eval_map,
+            "compute": compute_metrics,
         }
         if "avg_reward" in primary_metrics:
             logger.info(

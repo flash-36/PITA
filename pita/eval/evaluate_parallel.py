@@ -218,17 +218,16 @@ def evaluate_avg_reward_batched(
     if ds is None:
         return {}
 
-    # Reward model setup with larger batch size
+    # Reward model setup
     ds_cfg = cfg.datasets[dataset]
     rm_model = str(ds_cfg.reward_model)
-    reward_batch_size = max(batch_size, 32)
     scorer = RewardScorer(
         rm_model,
         bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
         bt_beta=float(cfg.data_collection.bradley_terry_beta),
         device="auto",
         dtype=str(cfg.system.dtype),
-        batch_size=reward_batch_size,
+        batch_size=batch_size,
     )
 
     max_examples = int(cfg.data_collection.max_examples or 0)

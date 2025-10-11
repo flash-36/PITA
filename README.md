@@ -22,26 +22,3 @@ The parallel runner automatically:
 - Works seamlessly with 1 GPU or multiple GPUs
 
 Hydra will create an output directory at `outputs/<date>/<experiment-name>-<time>/`.
-
-## Config overview
-- experiment.name (required): Name for the run; used in output paths.
-- algos: Configure multiple algorithms (enable/disable and hyperparams).
-- model_pairs: Reference/classifier model mappings.
-- datasets: List of dataset names.
-- system.use_parallel_execution (default: true): Enable multi-GPU parallel execution
-
-Override any config at the CLI, e.g.:
-```bash
-python run_parallel.py experiment.name=my_exp algos.PITA.enabled=true datasets="[AIME,IMDBGen]"
-```
-
-### Monitor GPU Usage
-```bash
-# In another terminal
-watch -n 1 nvidia-smi
-```
-
-For detailed GPU execution guide, see `GPU_EXECUTION_GUIDE.md`.
-
-## Plotting
-This repo provides a plotting hook to generate figures after runs, and a separate function to re-plot from saved results with style overrides for paper-ready figures.

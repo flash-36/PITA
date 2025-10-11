@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Iterator
 import os
+import time
+import random
 
 import torch
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, BatchSampler
 from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 from transformers import PreTrainedTokenizerBase
+from loguru import logger
 
 from pita.models.hf import HFModel
 from pita.core.prompts import build_instruction_prompt
@@ -24,6 +27,7 @@ class GRPOTrainer:
         micro_batch_size: int = 0,
         amp_dtype: str | None = None,
         clear_cache_interval: int = 0,
+        max_batch_num_tokens: int = -1,
     ) -> None:
         self.cfg = grpo_cfg
         self.tokenizer: PreTrainedTokenizerBase = policy.tokenizer
@@ -61,6 +65,7 @@ class GRPOTrainer:
         self.clear_cache_interval = int(clear_cache_interval)
         self.batch_size = int(grpo_cfg.batch_size)
         self.num_workers = int(grpo_cfg.num_workers)
+        self.max_batch_num_tokens = int(max_batch_num_tokens)
 
     def _tokenize_batch(self, batch: List[Any]) -> Dict[str, torch.Tensor]:
         prompts = [
@@ -220,6 +225,83 @@ class GRPOTrainer:
             }
         return result
 
+    class DynamicBatchSampler(BatchSampler):
+        """Dynamic batch sampler that adjusts batch size based on sequence length."""
+
+        def __init__(
+            self,
+            dataset,
+            tokenizer: PreTrainedTokenizerBase,
+            use_chat_template: bool,
+            max_batch_size: int,
+            max_batch_num_tokens: int,
+            *,
+            shuffle: bool = True,
+        ) -> None:
+            self.dataset = dataset
+            self.tokenizer = tokenizer
+            self.use_chat_template = bool(use_chat_template)
+            self.max_batch_size = int(max_batch_size)
+            self.max_tokens = int(max_batch_num_tokens)
+            self.shuffle = bool(shuffle)
+            self.epoch = 0
+
+        def __len__(self) -> int:
+            # Rough estimate: conservative lower bound
+            return max(1, len(self.dataset) // self.max_batch_size)
+
+        def set_epoch(self, epoch: int) -> None:
+            self.epoch = int(epoch)
+
+        def _estimate_tokens(self, idx: int) -> int:
+            """Estimate tokens for a single example."""
+            try:
+                ex = self.dataset[int(idx)]
+                # Estimate: prompt + response
+                prompt = build_instruction_prompt(
+                    ex.prompt,
+                    tokenizer=self.tokenizer,
+                    use_chat_template=self.use_chat_template,
+                )
+                p_result = self.tokenizer(prompt, add_special_tokens=False)
+                r_result = self.tokenizer(ex.response, add_special_tokens=False)
+                p_ids = p_result["input_ids"] if "input_ids" in p_result else []
+                r_ids = r_result["input_ids"] if "input_ids" in r_result else []
+                total = len(p_ids) + len(r_ids)
+                # Safety: return at least 1 to avoid division by zero issues
+                return max(total, 1)
+            except Exception as e:
+                # If estimation fails, return a conservative estimate
+                logger.warning(
+                    f"Failed to estimate tokens for idx {idx}: {e}, using default 512"
+                )
+                return 512
+
+        def __iter__(self) -> Iterator[List[int]]:
+            n = len(self.dataset)
+            indices = list(range(n))
+            if self.shuffle:
+                rng = random.Random(self.epoch)
+                rng.shuffle(indices)
+
+            batch: List[int] = []
+            cur_tokens = 0
+            for idx in indices:
+                est = self._estimate_tokens(idx)
+                # If adding this example would exceed limits, yield current batch
+                if batch and (
+                    cur_tokens + est > self.max_tokens
+                    or len(batch) >= self.max_batch_size
+                ):
+                    yield batch
+                    batch = []
+                    cur_tokens = 0
+                batch.append(idx)
+                cur_tokens += est
+            # Yield remaining batch
+            if batch:
+                yield batch
+
     def create_loader(self, ds, shuffle: bool = True) -> DataLoader:
         # In parallel mode, disable workers to avoid CUDA IPC issues
         # Each job already has dedicated GPU resources
@@ -227,21 +309,47 @@ class GRPOTrainer:
             0 if os.environ.get("PITA_PARALLEL_MODE") == "1" else self.num_workers
         )
 
-        return DataLoader(
-            ds,
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            collate_fn=self._collate_wrapper,
-            pin_memory=True,
-            persistent_workers=False,  # Can't pickle model objects
-        )
+        if self.max_batch_num_tokens > 0:
+            # Use dynamic batching based on token count
+            logger.info(
+                f"GRPOTrainer: Using dynamic batching with max_batch_num_tokens={self.max_batch_num_tokens}, "
+                f"max_batch_size={self.batch_size}"
+            )
+            sampler = self.DynamicBatchSampler(
+                ds,
+                tokenizer=self.tokenizer,
+                use_chat_template=self.use_chat_template,
+                max_batch_size=self.batch_size,
+                max_batch_num_tokens=self.max_batch_num_tokens,
+                shuffle=shuffle,
+            )
+            return DataLoader(
+                ds,
+                batch_sampler=sampler,
+                num_workers=num_workers,
+                collate_fn=self._collate_wrapper,
+                pin_memory=True,
+                persistent_workers=False,
+            )
+        else:
+            # Use fixed batch size (original behavior)
+            logger.info(f"GRPOTrainer: Using fixed batch size={self.batch_size}")
+            return DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=shuffle,
+                num_workers=num_workers,
+                collate_fn=self._collate_wrapper,
+                pin_memory=True,
+                persistent_workers=False,
+            )
 
     def train(self, loader: DataLoader, epochs: int = 1) -> Dict[str, Any]:
         self.policy.train()
         steps = 0
         accum = {"loss": 0.0, "avg_reward": 0.0, "avg_advantage": 0.0, "avg_kl": 0.0}
         total_epochs = int(epochs)
+        start_time = time.perf_counter()
         epoch_bar = tqdm(range(total_epochs), desc="GRPO:epochs")
 
         for e in epoch_bar:
@@ -311,5 +419,9 @@ class GRPOTrainer:
                 avg_r=f"{avg_metrics['avg_reward']:.4f}",
             )
 
+        elapsed = time.perf_counter() - start_time
         n = max(1, steps)
-        return {k: v / n for k, v in accum.items()} | {"steps": steps}
+        return {k: v / n for k, v in accum.items()} | {
+            "steps": steps,
+            "train_time_seconds": round(elapsed, 2),
+        }

@@ -18,6 +18,7 @@ from pita.models.value_classifier import ValueClassifier
 from pita.datasets import build_train_dataset, build_test_dataset
 from pita.core.io import get_run_root, get_snapshot_paths, merge_and_save_hf
 from pita.core.gpu_manager import get_gpu_manager
+from pita.core.compute_tracker import get_compute_tracker
 from pita.models import RewardScorer
 
 
@@ -151,7 +152,6 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         )
 
         gpu_manager = get_gpu_manager()
-        # Check if parallel generation is enabled (default: True if multiple GPUs available)
         parallel_enabled = (
             getattr(cfg, "parallel_generation", True)
             if hasattr(cfg, "parallel_generation")
@@ -159,16 +159,20 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         )
         use_parallel = gpu_manager.num_gpus > 1 and parallel_enabled
 
-        if use_parallel:
-            logger.info(f"Using parallel generation with {gpu_manager.num_gpus} GPUs")
-            records = self._generate_data_parallel(
-                cfg, ref_model, dataset, family, round_idx, cls_model, run_root
-            )
-        else:
-            logger.info("Using sequential generation")
-            records = self._generate_data_sequential(
-                cfg, ref_model, dataset, family, round_idx, cls_model, run_root
-            )
+        tracker = get_compute_tracker()
+        with tracker.track_phase(f"data_generation_{dataset}"):
+            if use_parallel:
+                logger.info(
+                    f"Using parallel generation with {gpu_manager.num_gpus} GPUs"
+                )
+                records = self._generate_data_parallel(
+                    cfg, ref_model, dataset, family, round_idx, cls_model, run_root
+                )
+            else:
+                logger.info("Using sequential generation")
+                records = self._generate_data_sequential(
+                    cfg, ref_model, dataset, family, round_idx, cls_model, run_root
+                )
 
         if not records:
             return
@@ -340,9 +344,7 @@ class ValueGuidedAlgorithms(AlgorithmBase):
             # Build reward scorer
             ds_cfg = cfg.datasets[dataset]
             rm_model = str(ds_cfg.reward_model)
-            reward_batch_size = max(
-                32, int(cfg.data_collection.reward_batch_size)
-            )  # Increase batch size
+            reward_batch_size = int(cfg.data_collection.reward_batch_size)
             reward_scorer = RewardScorer(
                 rm_model,
                 bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
@@ -352,11 +354,12 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                 batch_size=reward_batch_size,
             )
 
-            # Process examples
-            records = []
+            # Process examples - PHASE 1: Generate all samples first
             gen_cfg = model.gen_cfg
-
             logger.info(f"Worker {worker_id} processing {len(examples)} examples")
+
+            # Collect all generated samples for batch scoring
+            generated_samples = []
 
             for ex in examples:
                 rollout = model.roll_in(
@@ -399,25 +402,45 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                     y_a = solution_prefix_text + y_ref
                     y_b = solution_prefix_text + y_sample
 
-                    # Score samples using reward scorer
-                    score_a, score_b, preferred = reward_scorer.score_pair(
-                        ex["question"], y_a, y_b
-                    )
-
-                    records.append(
+                    # Store for batch scoring
+                    generated_samples.append(
                         {
-                            "question": ex["question"],
-                            "answer": ex["answer"],
-                            "prompt": ex["prompt"],
-                            "t": cutoff_tokens,
-                            "context": ex["prompt"] + solution_prefix_text,
+                            "ex": ex,
                             "y_a": y_a,
                             "y_b": y_b,
-                            "score_a": score_a,
-                            "score_b": score_b,
-                            "preferred": preferred,
+                            "cutoff_tokens": cutoff_tokens,
+                            "solution_prefix_text": solution_prefix_text,
                         }
                     )
+
+            logger.info(
+                f"Worker {worker_id} generated {len(generated_samples)} samples, now batch scoring..."
+            )
+
+            # PHASE 2: Batch score all samples at once
+            score_pairs = [
+                (s["ex"]["question"], s["y_a"], s["y_b"]) for s in generated_samples
+            ]
+            scores = reward_scorer.score_batch(score_pairs)
+
+            # PHASE 3: Create records with scores
+            records = []
+            for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
+                records.append(
+                    {
+                        "question": sample["ex"]["question"],
+                        "answer": sample["ex"]["answer"],
+                        "prompt": sample["ex"]["prompt"],
+                        "t": sample["cutoff_tokens"],
+                        "context": sample["ex"]["prompt"]
+                        + sample["solution_prefix_text"],
+                        "y_a": sample["y_a"],
+                        "y_b": sample["y_b"],
+                        "score_a": score_a,
+                        "score_b": score_b,
+                        "preferred": preferred,
+                    }
+                )
 
             logger.info(f"Worker {worker_id} generated {len(records)} records")
             result_queue.put(records)
@@ -540,10 +563,9 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         self._dataset = ds
         gen_cfg = model.gen_cfg
 
-        # Increase reward batch size
         ds_cfg = cfg.datasets[dataset]
         rm_model = str(ds_cfg.reward_model)
-        reward_batch_size = max(32, int(cfg.data_collection.reward_batch_size))
+        reward_batch_size = int(cfg.data_collection.reward_batch_size)
         reward_scorer = RewardScorer(
             rm_model,
             bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
@@ -555,12 +577,16 @@ class ValueGuidedAlgorithms(AlgorithmBase):
 
         samples_per_example = int(cfg.data_collection.samples_per_example)
 
-        records: List[Dict[str, Any]] = []
+        # PHASE 1: Generate all samples first
         max_examples = int(cfg.data_collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
 
+        generated_samples = []
+
         for ex in tqdm(
-            islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
+            islice(ds.iter(), limit),
+            total=limit,
+            desc=f"{self.algo_key}:{dataset} (generating)",
         ):
             prompt = ds.hydrate_prompt(ex.question)
             rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
@@ -606,24 +632,42 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                 y_a = solution_prefix_text + y_ref
                 y_b = solution_prefix_text + y_sample
 
-                score_a, score_b, preferred = reward_scorer.score_pair(
-                    ex.question, y_a, y_b
-                )
-
-                records.append(
+                # Store for batch scoring
+                generated_samples.append(
                     {
-                        "question": ex.question,
-                        "answer": ex.answer,
+                        "ex": ex,
                         "prompt": prompt,
-                        "t": cutoff_tokens,
-                        "context": prompt + solution_prefix_text,
                         "y_a": y_a,
                         "y_b": y_b,
-                        "score_a": score_a,
-                        "score_b": score_b,
-                        "preferred": preferred,
+                        "cutoff_tokens": cutoff_tokens,
+                        "solution_prefix_text": solution_prefix_text,
                     }
                 )
+
+        # PHASE 2: Batch score all samples
+        logger.info(f"Generated {len(generated_samples)} samples, now batch scoring...")
+        score_pairs = [
+            (s["ex"].question, s["y_a"], s["y_b"]) for s in generated_samples
+        ]
+        scores = reward_scorer.score_batch(score_pairs)
+
+        # PHASE 3: Create records with scores
+        records: List[Dict[str, Any]] = []
+        for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
+            records.append(
+                {
+                    "question": sample["ex"].question,
+                    "answer": sample["ex"].answer,
+                    "prompt": sample["prompt"],
+                    "t": sample["cutoff_tokens"],
+                    "context": sample["prompt"] + sample["solution_prefix_text"],
+                    "y_a": sample["y_a"],
+                    "y_b": sample["y_b"],
+                    "score_a": score_a,
+                    "score_b": score_b,
+                    "preferred": preferred,
+                }
+            )
 
         return records
 
@@ -692,7 +736,6 @@ class PostTrainingAlgorithms(AlgorithmBase):
         )
 
         gpu_manager = get_gpu_manager()
-        # Check if parallel generation is enabled (default: True if multiple GPUs available)
         parallel_enabled = (
             getattr(cfg, "parallel_generation", True)
             if hasattr(cfg, "parallel_generation")
@@ -700,16 +743,20 @@ class PostTrainingAlgorithms(AlgorithmBase):
         )
         use_parallel = gpu_manager.num_gpus > 1 and parallel_enabled
 
-        if use_parallel:
-            logger.info(f"Using parallel generation with {gpu_manager.num_gpus} GPUs")
-            records = self._generate_data_parallel(
-                cfg, ref_model, dataset, family, round_idx, run_root
-            )
-        else:
-            logger.info("Using sequential generation with optimized batching")
-            records = self._generate_data_sequential(
-                cfg, ref_model, dataset, family, round_idx, run_root
-            )
+        tracker = get_compute_tracker()
+        with tracker.track_phase(f"data_generation_{dataset}"):
+            if use_parallel:
+                logger.info(
+                    f"Using parallel generation with {gpu_manager.num_gpus} GPUs"
+                )
+                records = self._generate_data_parallel(
+                    cfg, ref_model, dataset, family, round_idx, run_root
+                )
+            else:
+                logger.info("Using sequential generation with optimized batching")
+                records = self._generate_data_sequential(
+                    cfg, ref_model, dataset, family, round_idx, run_root
+                )
 
         if not records:
             return
@@ -736,7 +783,7 @@ class PostTrainingAlgorithms(AlgorithmBase):
         ds_cfg = cfg.datasets[dataset]
         rm_model = str(ds_cfg.reward_model)
         device = 0 if torch.cuda.is_available() else -1
-        reward_batch_size = max(32, int(cfg.data_collection.reward_batch_size))
+        reward_batch_size = int(cfg.data_collection.reward_batch_size)
         self._reward = RewardScorer(
             rm_model,
             bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
@@ -748,12 +795,16 @@ class PostTrainingAlgorithms(AlgorithmBase):
 
         samples_per_example = int(cfg.data_collection.samples_per_example)
 
-        records: List[Dict[str, Any]] = []
+        # PHASE 1: Generate all samples first
         max_examples = int(cfg.data_collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
 
+        generated_samples = []
+
         for ex in tqdm(
-            islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
+            islice(ds.iter(), limit),
+            total=limit,
+            desc=f"{self.algo_key}:{dataset} (generating)",
         ):
             prompt = ds.hydrate_prompt(ex.question)
             built = build_instruction_prompt(
@@ -768,19 +819,38 @@ class PostTrainingAlgorithms(AlgorithmBase):
                 y_b = model.continue_from_context(
                     built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
                 )
-                score_a, score_b, preferred = self.score_samples(ex, y_a, y_b)
-                records.append(
+                # Store for batch scoring
+                generated_samples.append(
                     {
-                        "question": ex.question,
-                        "answer": ex.answer,
+                        "ex": ex,
                         "prompt": prompt,
                         "y_a": y_a,
                         "y_b": y_b,
-                        "score_a": score_a,
-                        "score_b": score_b,
-                        "preferred": preferred,
                     }
                 )
+
+        # PHASE 2: Batch score all samples
+        logger.info(f"Generated {len(generated_samples)} samples, now batch scoring...")
+        score_pairs = [
+            (s["ex"].question, s["y_a"], s["y_b"]) for s in generated_samples
+        ]
+        scores = self._reward.score_batch(score_pairs)
+
+        # PHASE 3: Create records with scores
+        records: List[Dict[str, Any]] = []
+        for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
+            records.append(
+                {
+                    "question": sample["ex"].question,
+                    "answer": sample["ex"].answer,
+                    "prompt": sample["prompt"],
+                    "y_a": sample["y_a"],
+                    "y_b": sample["y_b"],
+                    "score_a": score_a,
+                    "score_b": score_b,
+                    "preferred": preferred,
+                }
+            )
 
         return records
 
@@ -902,7 +972,7 @@ class PostTrainingAlgorithms(AlgorithmBase):
             # Build reward scorer
             ds_cfg = cfg.datasets[dataset]
             rm_model = str(ds_cfg.reward_model)
-            reward_batch_size = max(32, int(cfg.data_collection.reward_batch_size))
+            reward_batch_size = int(cfg.data_collection.reward_batch_size)
             reward_scorer = RewardScorer(
                 rm_model,
                 bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
@@ -912,10 +982,12 @@ class PostTrainingAlgorithms(AlgorithmBase):
                 batch_size=reward_batch_size,
             )
 
-            records = []
+            # PHASE 1: Generate all samples first
             gen_cfg = model.gen_cfg
-
             logger.info(f"Worker {worker_id} processing {len(examples)} examples")
+
+            # Collect all generated samples for batch scoring
+            generated_samples = []
 
             for ex in examples:
                 built = build_instruction_prompt(
@@ -930,21 +1002,40 @@ class PostTrainingAlgorithms(AlgorithmBase):
                     y_b = model.continue_from_context(
                         built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
                     )
-                    score_a, score_b, preferred = reward_scorer.score_pair(
-                        ex["question"], y_a, y_b
-                    )
-                    records.append(
+                    # Store for batch scoring
+                    generated_samples.append(
                         {
-                            "question": ex["question"],
-                            "answer": ex["answer"],
-                            "prompt": ex["prompt"],
+                            "ex": ex,
                             "y_a": y_a,
                             "y_b": y_b,
-                            "score_a": score_a,
-                            "score_b": score_b,
-                            "preferred": preferred,
                         }
                     )
+
+            logger.info(
+                f"Worker {worker_id} generated {len(generated_samples)} samples, now batch scoring..."
+            )
+
+            # PHASE 2: Batch score all samples at once
+            score_pairs = [
+                (s["ex"]["question"], s["y_a"], s["y_b"]) for s in generated_samples
+            ]
+            scores = reward_scorer.score_batch(score_pairs)
+
+            # PHASE 3: Create records with scores
+            records = []
+            for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
+                records.append(
+                    {
+                        "question": sample["ex"]["question"],
+                        "answer": sample["ex"]["answer"],
+                        "prompt": sample["ex"]["prompt"],
+                        "y_a": sample["y_a"],
+                        "y_b": sample["y_b"],
+                        "score_a": score_a,
+                        "score_b": score_b,
+                        "preferred": preferred,
+                    }
+                )
 
             logger.info(f"Worker {worker_id} generated {len(records)} records")
             result_queue.put(records)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
 import torch
@@ -61,10 +61,35 @@ class GuidedHFModel:
         return self.ref.generate_text(prompt, logits_processor=proc)
 
     @torch.inference_mode()
-    def generate_n(self, prompt: str, n: int, *, greedy: bool = False) -> List[str]:
-        proc = self._build_processor()
-        self._reset_state(proc)
-        return self.ref.generate_n(prompt, n, greedy=greedy, logits_processor=proc)
+    def generate_n(
+        self,
+        prompt: str,
+        n: int,
+        *,
+        greedy: bool = False,
+        batch_size: int = 1,
+        max_new_tokens: Optional[int] = None,
+    ) -> List[str]:
+        """Generate n sequences with guidance. Uses batch_size=1 by default for memory efficiency."""
+        all_outputs = []
+
+        for i in range(n):
+            proc = self._build_processor()
+            self._reset_state(proc)
+            outputs = self.ref.generate_n(
+                prompt,
+                1,
+                greedy=greedy,
+                logits_processor=proc,
+                batch_size=1,
+                max_new_tokens=max_new_tokens,
+            )
+            all_outputs.extend(outputs)
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        return all_outputs
 
     @torch.inference_mode()
     def roll_in(self, full_prompt: str, max_roll_tokens: int) -> Dict[str, Any]:

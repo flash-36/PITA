@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, Any
+import time
 
 import torch
 from torch.optim import AdamW
@@ -165,6 +166,7 @@ class DPOTrainer(PairwiseTrainerBase):
         opt_steps = 0
         accum = {"loss": 0.0, "acc": 0.0}
         total_epochs = int(epochs)
+        start_time = time.perf_counter()
         epoch_bar = tqdm(range(total_epochs), desc="DPO:epochs")
         for e in epoch_bar:
             bs = getattr(loader, "batch_sampler", None)
@@ -191,7 +193,11 @@ class DPOTrainer(PairwiseTrainerBase):
                         sub = {k: v[s:e2] for k, v in batch.items()}
                         out = self.dpo_step(sub)
                         loss: torch.Tensor = out["loss"] * ((e2 - s) / n)
-                        self.accelerator.backward(loss)
+                        # Backward with gradient scaling
+                        if self.scaler.is_enabled():
+                            self.scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
                         last_stats = out["stats"]
                     stats = last_stats or {
                         "loss": float(loss.detach().item()),
@@ -259,5 +265,11 @@ class DPOTrainer(PairwiseTrainerBase):
             avg_acc = accum["acc"] / max(1, steps)
             epoch_bar.set_postfix(avg_loss=f"{avg_loss:.4f}", avg_acc=f"{avg_acc:.4f}")
 
+        elapsed = time.perf_counter() - start_time
         n = max(1, steps)
-        return {"loss": accum["loss"] / n, "acc": accum["acc"] / n, "steps": steps}
+        return {
+            "loss": accum["loss"] / n,
+            "acc": accum["acc"] / n,
+            "steps": steps,
+            "train_time_seconds": round(elapsed, 2),
+        }

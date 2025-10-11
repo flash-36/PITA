@@ -27,7 +27,7 @@ class ValueClassifier(nn.Module):
         gradient_checkpointing: bool,
     ) -> None:
         super().__init__()
-        assert loss_type in ("bce", "mse", "mle")
+        assert loss_type in ("bce", "mse", "mle", "bradley_terry")
         self.tokenizer = tokenizer
         model_id = resolve_model_id(name_or_id)
         torch_dtype = None
@@ -103,6 +103,20 @@ class ValueClassifier(nn.Module):
                 logits, labels_expanded, reduction="none"
             )
             loss = (loss * loss_mask).sum(dim=-1) / denom
+        elif self.loss_type == "bradley_terry":
+            logits_squeezed = logits.squeeze(-1)
+            reward_scores = (logits_squeezed * loss_mask).sum(dim=-1) / denom
+            half_bs = bs // 2
+            chosen_rewards = reward_scores[:half_bs]
+            rejected_rewards = reward_scores[half_bs:]
+            logits_diff = chosen_rewards - rejected_rewards
+            loss = F.binary_cross_entropy_with_logits(
+                logits_diff,
+                torch.ones_like(logits_diff),
+                reduction="none",
+            )
+            loss_weights_chosen = loss_weights[:half_bs]
+            return (loss * loss_weights_chosen).mean()
         else:
             log_pmfs = F.log_softmax(logits, dim=-1)
             label_indices = torch.round(labels * (self.num_atoms - 1)).long()
@@ -144,49 +158,77 @@ class ValueClassifier(nn.Module):
         pad_id = getattr(self.tokenizer, "pad_token_id", 0)
         bs, seq_len = input_ids.shape
         top_k = logit_indices.size(1)
-        base = input_ids
-        expanded = (
-            base.unsqueeze(1)
-            .expand(bs, top_k, seq_len)
-            .contiguous()
-            .view(bs * top_k, seq_len)
-        )
-        cand = logit_indices.reshape(bs * top_k, 1)
-        expanded_ids = torch.cat([expanded, cand.to(expanded.device)], dim=1)
-        if attention_mask is not None:
-            base_mask = (
-                attention_mask.unsqueeze(1)
-                .expand(bs, top_k, seq_len)
+
+        chunk_size = 10
+        if top_k <= chunk_size:
+            chunk_size = top_k
+
+        all_logits = []
+        saved_past_key_values = None
+
+        for chunk_start in range(0, top_k, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, top_k)
+            chunk_indices = logit_indices[:, chunk_start:chunk_end]
+            chunk_k = chunk_indices.size(1)
+
+            base = input_ids
+            expanded = (
+                base.unsqueeze(1)
+                .expand(bs, chunk_k, seq_len)
                 .contiguous()
-                .view(bs * top_k, seq_len)
+                .view(bs * chunk_k, seq_len)
             )
-            expanded_mask = torch.cat(
-                [
-                    base_mask,
-                    torch.ones(
-                        (bs * top_k, 1), dtype=base_mask.dtype, device=base_mask.device
-                    ),
-                ],
-                dim=1,
+            cand = chunk_indices.reshape(bs * chunk_k, 1)
+            expanded_ids = torch.cat([expanded, cand.to(expanded.device)], dim=1)
+            if attention_mask is not None:
+                base_mask = (
+                    attention_mask.unsqueeze(1)
+                    .expand(bs, chunk_k, seq_len)
+                    .contiguous()
+                    .view(bs * chunk_k, seq_len)
+                )
+                expanded_mask = torch.cat(
+                    [
+                        base_mask,
+                        torch.ones(
+                            (bs * chunk_k, 1),
+                            dtype=base_mask.dtype,
+                            device=base_mask.device,
+                        ),
+                    ],
+                    dim=1,
+                )
+            else:
+                expanded_mask = expanded_ids.ne(pad_id).long()
+
+            out = self.backbone(
+                input_ids=expanded_ids,
+                attention_mask=expanded_mask,
+                use_cache=use_cache,
+                past_key_values=past_key_values,
+                output_hidden_states=True,
+                return_dict=True,
             )
-        else:
-            expanded_mask = expanded_ids.ne(pad_id).long()
-        out = self.backbone(
-            input_ids=expanded_ids,
-            attention_mask=expanded_mask,
-            use_cache=use_cache,
-            past_key_values=past_key_values,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-        last_hidden = out.hidden_states[-1][:, -1]
-        cand_logits = self.score(last_hidden)
-        if self.loss_type == "mle":
-            cand_logits = cand_logits.view(bs, top_k, self.num_atoms)
-        else:
-            cand_logits = cand_logits.view(bs, top_k)
+            last_hidden = out.hidden_states[-1][:, -1]
+            chunk_logits = self.score(last_hidden)
+
+            if self.loss_type == "mle":
+                chunk_logits = chunk_logits.view(bs, chunk_k, self.num_atoms)
+            else:
+                chunk_logits = chunk_logits.view(bs, chunk_k)
+
+            all_logits.append(chunk_logits)
+
+            if use_cache and chunk_start == 0:
+                saved_past_key_values = getattr(out, "past_key_values", None)
+
+            del out, last_hidden, expanded_ids, expanded_mask
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        cand_logits = torch.cat(all_logits, dim=1)
         return SimpleNamespace(
-            logits=cand_logits, past_key_values=getattr(out, "past_key_values", None)
+            logits=cand_logits, past_key_values=saved_past_key_values
         )
 
     def forward(

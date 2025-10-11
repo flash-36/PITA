@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Tuple, List
 
 import torch
 from transformers import AutoTokenizer, pipeline
@@ -106,3 +106,70 @@ class RewardScorer:
         if isinstance(outs[0], list):
             return float(outs[0][0]["score"])  # type: ignore[index]
         return float(outs[0]["score"])  # type: ignore[index]
+
+    def score_batch(
+        self, pairs: List[Tuple[str, str, str]]
+    ) -> List[Tuple[float, float, int]]:
+        """Score multiple (question, y_a, y_b) pairs in batch for efficiency.
+
+        Args:
+            pairs: List of (question, y_a, y_b) tuples to score
+
+        Returns:
+            List of (score_a, score_b, preferred) tuples
+        """
+        if not pairs:
+            return []
+
+        # Build all texts for batching
+        all_texts = []
+        if "distilbert-imdb" in self._model_id:
+            # For IMDb, we just score y_a and y_b directly
+            for _, y_a, y_b in pairs:
+                all_texts.extend([y_a, y_b])
+        else:
+            # For other models, build reward model prompts
+            for question, y_a, y_b in pairs:
+                texts = build_reward_model_prompt(
+                    question=question, y_a=y_a, y_b=y_b, tokenizer=self._tokenizer
+                )
+                all_texts.extend(texts)
+
+        # Batch score all texts at once
+        outs = self._pipe(
+            all_texts, top_k=None, function_to_apply="none", batch_size=self._batch_size
+        )
+
+        # Parse results and compute preferences
+        results = []
+        for i in range(len(pairs)):
+            if "distilbert-imdb" in self._model_id:
+                # Extract POSITIVE scores for y_a and y_b
+                r_a = [d for d in outs[i * 2] if d["label"] == "POSITIVE"][0]["score"]
+                r_b = [d for d in outs[i * 2 + 1] if d["label"] == "POSITIVE"][0][
+                    "score"
+                ]
+            else:
+                # Extract scores from reward model outputs
+                r_a = (
+                    float(outs[i * 2][0]["score"])
+                    if isinstance(outs[i * 2], list)
+                    else float(outs[i * 2]["score"])
+                )
+                r_b = (
+                    float(outs[i * 2 + 1][0]["score"])
+                    if isinstance(outs[i * 2 + 1], list)
+                    else float(outs[i * 2 + 1]["score"])
+                )
+
+            # Compute preference
+            if self._bt_sampling:
+                beta = self._bt_beta
+                p_a = 1.0 / (1.0 + math.exp(-beta * (r_a - r_b)))
+                preferred = 0 if random.random() < p_a else 1
+            else:
+                preferred = 0 if r_a >= r_b else 1
+
+            results.append((r_a, r_b, preferred))
+
+        return results

@@ -143,7 +143,9 @@ def evaluate_pass1_maj8(
             tokenizer=model.tokenizer,
             use_chat_template=model.gen_cfg.use_chat_template,
         )
-        preds: List[str] = model.generate_n(built, 8)
+
+        eval_max_tokens = 1024 if dataset in ["GSM8K", "MATH", "AIME"] else None
+        preds: List[str] = model.generate_n(built, 8, max_new_tokens=eval_max_tokens)
 
         if has_verifier and ds.is_correct(ex.answer, preds[0]):
             pass1 += 1

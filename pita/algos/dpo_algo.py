@@ -10,6 +10,7 @@ from pita.datasets import PreferencePairDataset
 from pita.core.registry import register_algorithm
 from .base import PostTrainingAlgorithms
 from pita.core.io import get_run_root, get_snapshot_paths
+from pita.core.compute_tracker import get_compute_tracker, reset_compute_tracker
 from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
 
 
@@ -34,7 +35,9 @@ class DPOAlgorithm(PostTrainingAlgorithms):
             family,
         )
 
-        # Load dataset
+        reset_compute_tracker()
+        tracker = get_compute_tracker()
+
         if run_root is None:
             run_root = get_run_root()
         _, hf_dir, _ = get_snapshot_paths(
@@ -65,7 +68,8 @@ class DPOAlgorithm(PostTrainingAlgorithms):
         )
 
         loader = trainer.create_loader(ds, shuffle=True)
-        stats = trainer.train(loader, epochs=int(self.cfg.epochs))
+        with tracker.track_phase(f"training_{dataset}"):
+            stats = trainer.train(loader, epochs=int(self.cfg.epochs))
 
         ckpt_dir = self.get_ckpt_dir(run_root, dataset, family, round_idx)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -115,6 +119,7 @@ class DPOAlgorithm(PostTrainingAlgorithms):
             next(iter(eval_map.values())) if eval_map else {}
         )
 
+        compute_metrics = tracker.get_metrics()
         result = {
             "algo": "DPO",
             "ref_model": ref_model,
@@ -127,6 +132,7 @@ class DPOAlgorithm(PostTrainingAlgorithms):
                 **primary_metrics,
             },
             "eval": eval_map,
+            "compute": compute_metrics,
         }
         if "avg_reward" in primary_metrics:
             logger.info(

@@ -45,7 +45,10 @@ class HFModel:
         }[gen_cfg.dtype]
         # Use device_map="auto" for inference-only single-process runs.
         # In distributed training (e.g., Accelerate/DDP), avoid device_map and let the trainer place/shard.
-        in_dist = os.environ.get("LOCAL_RANK") is not None or os.environ.get("RANK") is not None
+        in_dist = (
+            os.environ.get("LOCAL_RANK") is not None
+            or os.environ.get("RANK") is not None
+        )
         device_map = None if in_dist else "auto"
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
@@ -136,18 +139,51 @@ class HFModel:
         *,
         greedy: bool = False,
         logits_processor: Optional[LogitsProcessorList] = None,
+        batch_size: int = 1,
+        max_new_tokens: Optional[int] = None,
     ) -> List[str]:
+        """Generate n sequences, batched to avoid OOM with guided generation.
+
+        For guided generation with a classifier, batch_size=1 is safest since both
+        the reference model and classifier run in parallel, doubling memory usage.
+        """
+        n = int(n)
+        batch_size = min(int(batch_size), n)
+
+        all_outputs = []
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-        out = self.model.generate(
-            **inputs,
-            **self._gen_kwargs(greedy=greedy, logits_processor=logits_processor),
-            num_return_sequences=int(n),
-        )
         seq_len = inputs["input_ids"].shape[1]
-        return [
-            self.tokenizer.decode(seq[seq_len:], skip_special_tokens=True).strip()
-            for seq in out
-        ]
+
+        # Generate in batches
+        remaining = n
+        while remaining > 0:
+            current_batch = min(batch_size, remaining)
+            out = self.model.generate(
+                **inputs,
+                **self._gen_kwargs(
+                    greedy=greedy,
+                    logits_processor=logits_processor,
+                    max_new_tokens=max_new_tokens,
+                ),
+                num_return_sequences=current_batch,
+            )
+
+            # Decode this batch
+            batch_texts = [
+                self.tokenizer.decode(seq[seq_len:], skip_special_tokens=True).strip()
+                for seq in out
+            ]
+            all_outputs.extend(batch_texts)
+            remaining -= current_batch
+
+            # Delete generation output to free memory immediately
+            del out
+
+            # Clear cache between batches to free memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        return all_outputs
 
     @torch.inference_mode()
     def roll_in(
