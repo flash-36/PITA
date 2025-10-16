@@ -36,7 +36,7 @@ training:
 data_collection:
   samples_per_example: 4
   seed: 42
-  max_examples: 0
+  max_examples: 10
   reward_batch_size: 32  # Increased from 2 to 32 for better GPU utilization
   bradley_terry_sampling: true
   bradley_terry_beta: 1.0

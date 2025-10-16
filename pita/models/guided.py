@@ -104,3 +104,31 @@ class GuidedHFModel:
         return self.ref.continue_from_context(
             context_text, max_new_tokens, greedy, logits_processor=None
         )
+
+    @torch.inference_mode()
+    def roll_in_batch(
+        self, prompts: List[str], max_roll_tokens: int, batch_size: int = 8
+    ) -> List[Dict[str, Any]]:
+        """Batch greedy rollout with guidance."""
+        proc = self._build_processor()
+        self._reset_state(proc)
+        return self.ref.roll_in_batch(
+            prompts, max_roll_tokens, logits_processor=proc, batch_size=batch_size
+        )
+
+    @torch.inference_mode()
+    def continue_from_context_batch(
+        self,
+        contexts: List[str],
+        max_new_tokens: int,
+        greedy: bool,
+        batch_size: int = 8,
+    ) -> List[str]:
+        """Batch continuation without guidance."""
+        return self.ref.continue_from_context_batch(
+            contexts,
+            max_new_tokens,
+            greedy,
+            logits_processor=None,
+            batch_size=batch_size,
+        )

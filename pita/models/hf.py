@@ -247,3 +247,104 @@ class HFModel:
         )
         new_tokens = out[0][ids["input_ids"].shape[1] :]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    @torch.inference_mode()
+    def roll_in_batch(
+        self,
+        prompts: List[str],
+        max_roll_tokens: int,
+        logits_processor: Optional[LogitsProcessorList] = None,
+        batch_size: int = 8,
+    ) -> List[Dict[str, Any]]:
+        """Batch greedy rollout for multiple prompts."""
+        built_prompts = [
+            build_instruction_prompt(
+                p,
+                tokenizer=self.tokenizer,
+                use_chat_template=self.gen_cfg.use_chat_template,
+            )
+            for p in prompts
+        ]
+
+        all_results = []
+        for i in range(0, len(built_prompts), batch_size):
+            batch = built_prompts[i : i + batch_size]
+            ids = self.tokenizer(batch, return_tensors="pt", padding=True).to(
+                self.model.device
+            )
+            prompt_lengths = (ids["attention_mask"].sum(dim=1)).tolist()
+
+            out = self.model.generate(
+                **ids,
+                **self._gen_kwargs(
+                    greedy=True,
+                    logits_processor=logits_processor,
+                    max_new_tokens=max_roll_tokens,
+                ),
+            )
+
+            for j, (seq, prompt_len) in enumerate(zip(out, prompt_lengths)):
+                context_text = self.tokenizer.decode(seq, skip_special_tokens=True)
+                all_results.append(
+                    {
+                        "prompt": batch[j],
+                        "context_ids": seq,
+                        "context_text": context_text,
+                    }
+                )
+
+            del out
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        return all_results
+
+    @torch.inference_mode()
+    def continue_from_context_batch(
+        self,
+        contexts: List[str],
+        max_new_tokens: int,
+        greedy: bool,
+        logits_processor: Optional[LogitsProcessorList] = None,
+        batch_size: int = 8,
+    ) -> List[str]:
+        """Batch continuation from multiple contexts."""
+        max_position_embeddings = getattr(
+            self.model.config, "max_position_embeddings", 2048
+        )
+        max_length_for_gen = max_position_embeddings - max_new_tokens
+
+        all_results = []
+        for i in range(0, len(contexts), batch_size):
+            batch = contexts[i : i + batch_size]
+            ids = self.tokenizer(batch, return_tensors="pt", padding=True).to(
+                self.model.device
+            )
+
+            if ids["input_ids"].shape[1] > max_length_for_gen:
+                ids["input_ids"] = ids["input_ids"][:, -max_length_for_gen:]
+                ids["attention_mask"] = ids["attention_mask"][:, -max_length_for_gen:]
+
+            prompt_lengths = (ids["attention_mask"].sum(dim=1)).tolist()
+
+            out = self.model.generate(
+                **ids,
+                **self._gen_kwargs(
+                    greedy=greedy,
+                    logits_processor=logits_processor,
+                    max_new_tokens=max_new_tokens,
+                ),
+            )
+
+            for seq, prompt_len in zip(out, prompt_lengths):
+                new_tokens = seq[prompt_len:]
+                text = self.tokenizer.decode(
+                    new_tokens, skip_special_tokens=True
+                ).strip()
+                all_results.append(text)
+
+            del out
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        return all_results

@@ -354,18 +354,21 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                 batch_size=reward_batch_size,
             )
 
-            # Process examples - PHASE 1: Generate all samples first
             gen_cfg = model.gen_cfg
-            logger.info(f"Worker {worker_id} processing {len(examples)} examples")
+            batch_size = int(cfg.algos[self.algo_key].batch_size)
+            logger.info(
+                f"🔄 Worker {worker_id} processing {len(examples)} examples with batch_size={batch_size}"
+            )
 
-            # Collect all generated samples for batch scoring
-            generated_samples = []
+            # PHASE 1: Batch all roll_in calls
+            prompts = [ex["prompt"] for ex in examples]
+            rollouts = model.roll_in_batch(
+                prompts, gen_cfg.max_new_tokens, batch_size=batch_size
+            )
 
-            for ex in examples:
-                rollout = model.roll_in(
-                    ex["prompt"], max_roll_tokens=gen_cfg.max_new_tokens
-                )
-
+            # PHASE 2: Prepare contexts for continuation
+            contexts_to_continue = []
+            for ex, rollout in zip(examples, rollouts):
                 built_prompt = rollout["prompt"]
                 prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
                 context_token_ids = rollout["context_ids"].tolist()
@@ -390,40 +393,68 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                     )
 
                     remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
-                    y_ref = model.continue_from_context(
-                        context_text, max_new_tokens=remaining_token_budget, greedy=True
-                    )
-                    y_sample = model.continue_from_context(
-                        context_text,
-                        max_new_tokens=remaining_token_budget,
-                        greedy=False,
-                    )
-
-                    y_a = solution_prefix_text + y_ref
-                    y_b = solution_prefix_text + y_sample
-
-                    # Store for batch scoring
-                    generated_samples.append(
+                    contexts_to_continue.append(
                         {
                             "ex": ex,
-                            "y_a": y_a,
-                            "y_b": y_b,
-                            "cutoff_tokens": cutoff_tokens,
+                            "context_text": context_text,
                             "solution_prefix_text": solution_prefix_text,
+                            "cutoff_tokens": cutoff_tokens,
+                            "remaining_token_budget": remaining_token_budget,
                         }
                     )
 
             logger.info(
-                f"Worker {worker_id} generated {len(generated_samples)} samples, now batch scoring..."
+                f"🔄 Worker {worker_id} prepared {len(contexts_to_continue)} contexts, now batching continuations..."
             )
 
-            # PHASE 2: Batch score all samples at once
+            if not contexts_to_continue:
+                logger.info(
+                    f"⚠️ Worker {worker_id} has no valid contexts (all rollouts too short)"
+                )
+                result_queue.put([])
+                return
+
+            # PHASE 3: Batch all continue_from_context calls
+            all_contexts = [item["context_text"] for item in contexts_to_continue]
+            min_remaining_tokens = min(
+                item["remaining_token_budget"] for item in contexts_to_continue
+            )
+
+            greedy_continuations = model.continue_from_context_batch(
+                all_contexts, min_remaining_tokens, greedy=True, batch_size=batch_size
+            )
+            sampled_continuations = model.continue_from_context_batch(
+                all_contexts, min_remaining_tokens, greedy=False, batch_size=batch_size
+            )
+
+            # PHASE 4: Assemble generated samples
+            generated_samples = []
+            for ctx, y_ref, y_sample in zip(
+                contexts_to_continue, greedy_continuations, sampled_continuations
+            ):
+                y_a = ctx["solution_prefix_text"] + y_ref
+                y_b = ctx["solution_prefix_text"] + y_sample
+                generated_samples.append(
+                    {
+                        "ex": ctx["ex"],
+                        "y_a": y_a,
+                        "y_b": y_b,
+                        "cutoff_tokens": ctx["cutoff_tokens"],
+                        "solution_prefix_text": ctx["solution_prefix_text"],
+                    }
+                )
+
+            logger.info(
+                f"✅ Worker {worker_id} generated {len(generated_samples)} samples, now batch scoring..."
+            )
+
+            # PHASE 5: Batch score all samples at once
             score_pairs = [
                 (s["ex"]["question"], s["y_a"], s["y_b"]) for s in generated_samples
             ]
             scores = reward_scorer.score_batch(score_pairs)
 
-            # PHASE 3: Create records with scores
+            # PHASE 6: Create records with scores
             records = []
             for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
                 records.append(
@@ -442,7 +473,7 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                     }
                 )
 
-            logger.info(f"Worker {worker_id} generated {len(records)} records")
+            logger.info(f"✅ Worker {worker_id} generated {len(records)} records")
             result_queue.put(records)
 
         except Exception as e:
