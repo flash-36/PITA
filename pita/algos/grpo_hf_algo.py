@@ -61,42 +61,80 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
         )
 
         samples_per_prompt = int(self.cfg.samples_per_prompt)
-        records: List[Dict[str, Any]] = []
+        batch_size = int(cfg.algos[self.algo_key].batch_size)
         max_examples = int(cfg.data_collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
 
-        for ex in tqdm(
-            islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
-        ):
+        # Collect all examples first
+        examples = []
+        for ex in islice(ds.iter(), limit):
             prompt = ds.hydrate_prompt(ex.question)
             built = build_instruction_prompt(
                 prompt,
                 tokenizer=model.tokenizer,
                 use_chat_template=model.gen_cfg.use_chat_template,
             )
+            examples.append({"ex": ex, "prompt": prompt, "built": built})
 
-            responses = []
-            rewards = []
+        logger.info(
+            f"🔄 Processing {len(examples)} examples with batch_size={batch_size}"
+        )
+
+        # PHASE 1: Build all prompts
+        prompts_to_generate = []
+        example_indices = []
+        for ex_idx, item in enumerate(examples):
             for _ in range(samples_per_prompt):
-                response = model.continue_from_context(
-                    built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
-                )
-                reward = self._reward.score_single(ex.question, response)
-                responses.append(response)
-                rewards.append(float(reward))
+                prompts_to_generate.append(item["built"])
+                example_indices.append(ex_idx)
 
-            best_idx = max(range(len(rewards)), key=lambda i: rewards[i])
-            worst_idx = min(range(len(rewards)), key=lambda i: rewards[i])
+        logger.info(
+            f"🔄 Prepared {len(prompts_to_generate)} prompts, now batching generations..."
+        )
+
+        # PHASE 2: Batch generate all responses
+        responses = model.continue_from_context_batch(
+            prompts_to_generate,
+            gen_cfg.max_new_tokens,
+            greedy=False,
+            batch_size=batch_size,
+        )
+
+        # PHASE 3: Batch score all responses
+        logger.info(f"✅ Generated {len(responses)} responses, now batch scoring...")
+        score_pairs = [
+            (examples[ex_idx]["ex"].question, response)
+            for ex_idx, response in zip(example_indices, responses)
+        ]
+        rewards = self._reward.score_batch_single(score_pairs)
+
+        # PHASE 4: Group by example and select best/worst
+        records: List[Dict[str, Any]] = []
+        for ex_idx, item in enumerate(examples):
+            # Get responses and rewards for this example
+            ex_responses = [
+                responses[i]
+                for i in range(len(example_indices))
+                if example_indices[i] == ex_idx
+            ]
+            ex_rewards = [
+                rewards[i]
+                for i in range(len(example_indices))
+                if example_indices[i] == ex_idx
+            ]
+
+            best_idx = max(range(len(ex_rewards)), key=lambda i: ex_rewards[i])
+            worst_idx = min(range(len(ex_rewards)), key=lambda i: ex_rewards[i])
 
             records.append(
                 {
-                    "question": ex.question,
-                    "answer": ex.answer,
-                    "prompt": prompt,
-                    "y_a": responses[best_idx],
-                    "y_b": responses[worst_idx],
-                    "score_a": rewards[best_idx],
-                    "score_b": rewards[worst_idx],
+                    "question": item["ex"].question,
+                    "answer": item["ex"].answer,
+                    "prompt": item["prompt"],
+                    "y_a": ex_responses[best_idx],
+                    "y_b": ex_responses[worst_idx],
+                    "score_a": ex_rewards[best_idx],
+                    "score_b": ex_rewards[worst_idx],
                     "preferred": 0,
                 }
             )

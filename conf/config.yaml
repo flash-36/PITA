@@ -58,7 +58,7 @@ evaluation:
 
 # Algorithms (present = enabled). Each entry holds algo-specific hyperparams
 # Parallel execution settings
-parallel_generation: true  # Enable parallel data generation across GPUs
+parallel_generation: false  # Disable multi-GPU parallel generation (each job gets one GPU)
 use_parallel_execution: true  # Enable parallel job execution
 
 algos:

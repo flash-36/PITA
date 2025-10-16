@@ -97,16 +97,32 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         gen_cfg = model.gen_cfg
 
         samples_per_example = int(cfg.data_collection.samples_per_example)
+        batch_size = int(cfg.algos[self.algo_key].batch_size)
 
-        records: List[Dict[str, Any]] = []
         max_examples = int(cfg.data_collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
-        for ex in tqdm(
-            islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
-        ):
-            prompt = ds.hydrate_prompt(ex.question)
-            rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
 
+        # Collect all examples first
+        examples = []
+        for ex in islice(ds.iter(), limit):
+            prompt = ds.hydrate_prompt(ex.question)
+            examples.append({"ex": ex, "prompt": prompt})
+
+        logger.info(
+            f"🔄 Processing {len(examples)} examples with batch_size={batch_size}"
+        )
+
+        # PHASE 1: Batch all roll_in calls
+        prompts = [item["prompt"] for item in examples]
+        rollouts = model.roll_in_batch(
+            prompts, gen_cfg.max_new_tokens, batch_size=batch_size
+        )
+
+        # PHASE 2: Prepare contexts for continuation
+        contexts_to_continue = []
+        for item, rollout in tqdm(
+            zip(examples, rollouts), total=len(examples), desc="Preparing contexts"
+        ):
             built_prompt = rollout["prompt"]
             prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
             context_token_ids = rollout["context_ids"].tolist()
@@ -138,32 +154,64 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
                 )
 
                 remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
-                y_ref = model.continue_from_context(
-                    context_text, max_new_tokens=remaining_token_budget, greedy=True
-                )
-                y_sample = model.continue_from_context(
-                    context_text, max_new_tokens=remaining_token_budget, greedy=False
-                )
-
-                y_a = solution_prefix_text + y_ref
-                y_b = solution_prefix_text + y_sample
-
-                score_a, score_b, preferred = self.score_samples(ex, y_a, y_b)
-
-                records.append(
+                contexts_to_continue.append(
                     {
-                        "question": ex.question,
-                        "answer": ex.answer,
-                        "prompt": prompt,
-                        "t": cutoff_tokens,
-                        "context": prompt + solution_prefix_text,
-                        "y_a": y_a,
-                        "y_b": y_b,
-                        "score_a": score_a,
-                        "score_b": score_b,
-                        "preferred": preferred,
+                        "ex": item["ex"],
+                        "prompt": item["prompt"],
+                        "context_text": context_text,
+                        "solution_prefix_text": solution_prefix_text,
+                        "cutoff_tokens": cutoff_tokens,
+                        "remaining_token_budget": remaining_token_budget,
                     }
                 )
+
+        if not contexts_to_continue:
+            logger.info("⚠️ No valid contexts (all rollouts too short)")
+            return
+
+        logger.info(
+            f"🔄 Prepared {len(contexts_to_continue)} contexts, now batching continuations..."
+        )
+
+        # PHASE 3: Batch all continue_from_context calls
+        all_contexts = [item["context_text"] for item in contexts_to_continue]
+        min_remaining_tokens = min(
+            item["remaining_token_budget"] for item in contexts_to_continue
+        )
+
+        greedy_continuations = model.continue_from_context_batch(
+            all_contexts, min_remaining_tokens, greedy=True, batch_size=batch_size
+        )
+        sampled_continuations = model.continue_from_context_batch(
+            all_contexts, min_remaining_tokens, greedy=False, batch_size=batch_size
+        )
+
+        # PHASE 4: Assemble generated samples and score
+        records: List[Dict[str, Any]] = []
+        for ctx, y_ref, y_sample in tqdm(
+            zip(contexts_to_continue, greedy_continuations, sampled_continuations),
+            total=len(contexts_to_continue),
+            desc="Scoring samples",
+        ):
+            y_a = ctx["solution_prefix_text"] + y_ref
+            y_b = ctx["solution_prefix_text"] + y_sample
+
+            score_a, score_b, preferred = self.score_samples(ctx["ex"], y_a, y_b)
+
+            records.append(
+                {
+                    "question": ctx["ex"].question,
+                    "answer": ctx["ex"].answer,
+                    "prompt": ctx["prompt"],
+                    "t": ctx["cutoff_tokens"],
+                    "context": ctx["prompt"] + ctx["solution_prefix_text"],
+                    "y_a": y_a,
+                    "y_b": y_b,
+                    "score_a": score_a,
+                    "score_b": score_b,
+                    "preferred": preferred,
+                }
+            )
 
         if not records:
             return
