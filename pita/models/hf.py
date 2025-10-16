@@ -229,15 +229,6 @@ class HFModel:
     ) -> str:
         ids = self.tokenizer(context_text, return_tensors="pt").to(self.model.device)
 
-        max_position_embeddings = getattr(
-            self.model.config, "max_position_embeddings", 2048
-        )
-        max_length_for_gen = max_position_embeddings - max_new_tokens
-
-        if ids["input_ids"].shape[1] > max_length_for_gen:
-            ids["input_ids"] = ids["input_ids"][:, -max_length_for_gen:]
-            ids["attention_mask"] = ids["attention_mask"][:, -max_length_for_gen:]
-
         out = self.model.generate(
             **ids,
             **self._gen_kwargs(
@@ -320,11 +311,6 @@ class HFModel:
         batch_size: int = 8,
     ) -> List[str]:
         """Batch continuation from multiple contexts."""
-        max_position_embeddings = getattr(
-            self.model.config, "max_position_embeddings", 2048
-        )
-        max_length_for_gen = max_position_embeddings - max_new_tokens
-
         all_results = []
         num_batches = (len(contexts) + batch_size - 1) // batch_size
         mode = "greedy" if greedy else "sampled"
@@ -341,10 +327,6 @@ class HFModel:
             ids = self.tokenizer(batch, return_tensors="pt", padding=True).to(
                 self.model.device
             )
-
-            if ids["input_ids"].shape[1] > max_length_for_gen:
-                ids["input_ids"] = ids["input_ids"][:, -max_length_for_gen:]
-                ids["attention_mask"] = ids["attention_mask"][:, -max_length_for_gen:]
 
             prompt_lengths = (ids["attention_mask"].sum(dim=1)).tolist()
 
