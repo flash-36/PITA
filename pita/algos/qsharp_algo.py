@@ -169,6 +169,15 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
             logger.info("⚠️ No valid contexts (all rollouts too short)")
             return
 
+        # Filter out contexts with non-positive remaining tokens
+        contexts_to_continue = [
+            ctx for ctx in contexts_to_continue if ctx["remaining_token_budget"] >= 1
+        ]
+
+        if not contexts_to_continue:
+            logger.info("⚠️ No valid contexts (all have insufficient remaining tokens)")
+            return
+
         logger.info(
             f"🔄 Prepared {len(contexts_to_continue)} contexts, now batching continuations..."
         )

@@ -407,16 +407,30 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                         }
                     )
 
-            logger.info(
-                f"🔄 Worker {worker_id} prepared {len(contexts_to_continue)} contexts, now batching continuations..."
-            )
-
             if not contexts_to_continue:
                 logger.info(
                     f"⚠️ Worker {worker_id} has no valid contexts (all rollouts too short)"
                 )
                 result_queue.put([])
                 return
+
+            # Filter out contexts with non-positive remaining tokens
+            contexts_to_continue = [
+                ctx
+                for ctx in contexts_to_continue
+                if ctx["remaining_token_budget"] >= 1
+            ]
+
+            if not contexts_to_continue:
+                logger.info(
+                    f"⚠️ Worker {worker_id} has no valid contexts (all have insufficient remaining tokens)"
+                )
+                result_queue.put([])
+                return
+
+            logger.info(
+                f"🔄 Worker {worker_id} prepared {len(contexts_to_continue)} contexts, now batching continuations..."
+            )
 
             # PHASE 3: Batch all continue_from_context calls
             all_contexts = [item["context_text"] for item in contexts_to_continue]
@@ -681,6 +695,15 @@ class ValueGuidedAlgorithms(AlgorithmBase):
 
         if not contexts_to_continue:
             logger.info("⚠️ No valid contexts (all rollouts too short)")
+            return []
+
+        # Filter out contexts with non-positive remaining tokens
+        contexts_to_continue = [
+            ctx for ctx in contexts_to_continue if ctx["remaining_token_budget"] >= 1
+        ]
+
+        if not contexts_to_continue:
+            logger.info("⚠️ No valid contexts (all have insufficient remaining tokens)")
             return []
 
         logger.info(
