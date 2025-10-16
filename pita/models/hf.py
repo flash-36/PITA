@@ -269,6 +269,10 @@ class HFModel:
 
         all_results = []
         num_batches = (len(built_prompts) + batch_size - 1) // batch_size
+
+        original_padding_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "left"
+
         for i in tqdm(
             range(0, len(built_prompts), batch_size),
             total=num_batches,
@@ -303,6 +307,7 @@ class HFModel:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+        self.tokenizer.padding_side = original_padding_side
         return all_results
 
     @torch.inference_mode()
@@ -323,6 +328,10 @@ class HFModel:
         all_results = []
         num_batches = (len(contexts) + batch_size - 1) // batch_size
         mode = "greedy" if greedy else "sampled"
+
+        original_padding_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "left"
+
         for i in tqdm(
             range(0, len(contexts), batch_size),
             total=num_batches,
@@ -359,4 +368,5 @@ class HFModel:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+        self.tokenizer.padding_side = original_padding_side
         return all_results
