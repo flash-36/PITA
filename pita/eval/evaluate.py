@@ -10,6 +10,7 @@ from tqdm import tqdm
 from itertools import islice
 import torch
 import torch.nn.functional as F
+from loguru import logger
 
 from pita.models.hf import HFModel
 from pita.models.guided import GuidedHFModel
@@ -144,8 +145,15 @@ def evaluate_pass1_maj8(
             use_chat_template=model.gen_cfg.use_chat_template,
         )
 
-        eval_max_tokens = 1024 if dataset in ["GSM8K", "MATH", "AIME"] else None
-        preds: List[str] = model.generate_n(built, 8, max_new_tokens=eval_max_tokens)
+        eval_max_tokens = (
+            int(cfg.evaluation.max_tokens_reasoning)
+            if dataset in ["GSM8K", "MATH", "AIME"]
+            else None
+        )
+        num_samples = int(cfg.evaluation.num_samples)
+        preds: List[str] = model.generate_n(
+            built, num_samples, max_new_tokens=eval_max_tokens
+        )
 
         if has_verifier and ds.is_correct(ex.answer, preds[0]):
             pass1 += 1
@@ -177,7 +185,7 @@ def evaluate_pass1_maj8(
             {
                 "question": ex.question,
                 "answer": ex.answer,
-                **{f"pred_{i+1}": preds[i] for i in range(8)},
+                **{f"pred_{i+1}": preds[i] for i in range(len(preds))},
             }
         )
 
@@ -220,26 +228,46 @@ def evaluate_avg_reward(
 
     max_examples = int(cfg.data_collection.max_examples or 0)
     limit = max_examples if max_examples > 0 else len(ds)
+    batch_size = int(cfg.evaluation.batch_size)
 
-    total = 0
-    sum_reward = 0.0
-    sum_kl = 0.0
-    rows: List[Dict[str, str]] = []
-    for ex in tqdm(islice(ds.iter(), limit), total=limit, desc=f"EvalR:{dataset}"):
+    # Collect all examples first
+    examples = list(islice(ds.iter(), limit))
+    logger.info(f"🔄 Evaluating {len(examples)} examples with batch_size={batch_size}")
+
+    # PHASE 1: Build all prompts
+    prompts_data = []
+    for ex in examples:
         prompt = ds.hydrate_prompt(ex.question)
         built = build_instruction_prompt(
             prompt,
             tokenizer=model.tokenizer,
             use_chat_template=model.gen_cfg.use_chat_template,
         )
-        # Generate a single continuation for reward evaluation
-        pred: str = model.continue_from_context(
-            built, max_new_tokens=model.gen_cfg.max_new_tokens, greedy=False
-        )
+        prompts_data.append({"ex": ex, "built": built})
 
-        # Score using reward model on (original question, generated text)
-        # Use the original question, not the hydrated prompt
-        r = float(scorer.score_single(ex.question, pred))  # type: ignore[attr-defined]
+    # PHASE 2: Batch generate all predictions
+    logger.info("🔄 Batching generation...")
+    all_prompts = [item["built"] for item in prompts_data]
+    preds = model.continue_from_context_batch(
+        all_prompts, model.gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+    )
+
+    # PHASE 3: Batch score all predictions
+    logger.info("✅ Batching reward scoring...")
+    score_pairs = [
+        (item["ex"].question, pred) for item, pred in zip(prompts_data, preds)
+    ]
+    rewards = scorer.score_batch_single(score_pairs)
+
+    # PHASE 4: Compute KL and assemble results
+    total = 0
+    sum_reward = 0.0
+    sum_kl = 0.0
+    rows: List[Dict[str, str]] = []
+
+    for item, pred, r in tqdm(
+        zip(prompts_data, preds, rewards), total=len(examples), desc=f"EvalR:{dataset}"
+    ):
         sum_reward += r
         total += 1
 
@@ -248,7 +276,7 @@ def evaluate_avg_reward(
             sum_kl += _compute_traj_kl_for_text(
                 model,
                 ref_model,
-                prompt_text=built,
+                prompt_text=item["built"],
                 continuation_text=pred,
             )
         except Exception:
@@ -256,8 +284,8 @@ def evaluate_avg_reward(
 
         rows.append(
             {
-                "question": ex.question,
-                "answer": ex.answer,
+                "question": item["ex"].question,
+                "answer": item["ex"].answer,
                 "pred": pred,
                 "reward": r,
             }

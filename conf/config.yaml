@@ -45,6 +45,12 @@ data_collection:
 evaluation:
   # Evaluate guided decoding at multiple eta values
   etas: [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+  # Number of samples for majority voting evaluation
+  num_samples: 16
+  # Batch size for evaluation generation
+  batch_size: 16
+  # Max tokens for math/reasoning tasks (GSM8K, MATH, AIME)
+  max_tokens_reasoning: 2048
   # For each training dataset, which datasets to evaluate on
   datasets_by_train:
     GSM8K:

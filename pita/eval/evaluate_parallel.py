@@ -145,8 +145,9 @@ def evaluate_pass1_maj8_batched(
             use_chat_template=model.gen_cfg.use_chat_template,
         )
 
-        # Generate 8 samples
-        preds: List[str] = model.generate_n(built, 8)
+        # Generate samples for majority voting
+        num_samples = int(cfg.evaluation.num_samples)
+        preds: List[str] = model.generate_n(built, num_samples)
 
         if has_verifier and ds.is_correct(ex.answer, preds[0]):
             pass1 += 1
@@ -178,7 +179,7 @@ def evaluate_pass1_maj8_batched(
             {
                 "question": ex.question,
                 "answer": ex.answer,
-                **{f"pred_{i+1}": preds[i] for i in range(8)},
+                **{f"pred_{i+1}": preds[i] for i in range(len(preds))},
             }
         )
 
@@ -233,25 +234,46 @@ def evaluate_avg_reward_batched(
     max_examples = int(cfg.data_collection.max_examples or 0)
     limit = max_examples if max_examples > 0 else len(ds)
 
-    total = 0
-    sum_reward = 0.0
-    sum_kl = 0.0
-    rows: List[Dict[str, str]] = []
+    # Collect all examples first
+    examples = list(islice(ds.iter(), limit))
+    logger.info(f"🔄 Evaluating {len(examples)} examples with batch_size={batch_size}")
 
+    # PHASE 1: Build all prompts
     from tqdm import tqdm
 
-    for ex in tqdm(islice(ds.iter(), limit), total=limit, desc=f"EvalR:{dataset}"):
+    prompts_data = []
+    for ex in examples:
         prompt = ds.hydrate_prompt(ex.question)
         built = build_instruction_prompt(
             prompt,
             tokenizer=model.tokenizer,
             use_chat_template=model.gen_cfg.use_chat_template,
         )
-        pred: str = model.continue_from_context(
-            built, max_new_tokens=model.gen_cfg.max_new_tokens, greedy=False
-        )
+        prompts_data.append({"ex": ex, "built": built})
 
-        r = float(scorer.score_single(ex.question, pred))
+    # PHASE 2: Batch generate all predictions
+    logger.info("🔄 Batching generation...")
+    all_prompts = [item["built"] for item in prompts_data]
+    preds = model.continue_from_context_batch(
+        all_prompts, model.gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+    )
+
+    # PHASE 3: Batch score all predictions
+    logger.info("✅ Batching reward scoring...")
+    score_pairs = [
+        (item["ex"].question, pred) for item, pred in zip(prompts_data, preds)
+    ]
+    rewards = scorer.score_batch_single(score_pairs)
+
+    # PHASE 4: Compute KL and assemble results
+    total = 0
+    sum_reward = 0.0
+    sum_kl = 0.0
+    rows: List[Dict[str, str]] = []
+
+    for item, pred, r in tqdm(
+        zip(prompts_data, preds, rewards), total=len(examples), desc=f"EvalR:{dataset}"
+    ):
         sum_reward += r
         total += 1
 
@@ -259,7 +281,7 @@ def evaluate_avg_reward_batched(
             sum_kl += _compute_traj_kl_for_text(
                 model,
                 ref_model,
-                prompt_text=built,
+                prompt_text=item["built"],
                 continuation_text=pred,
             )
         except Exception:
@@ -267,8 +289,8 @@ def evaluate_avg_reward_batched(
 
         rows.append(
             {
-                "question": ex.question,
-                "answer": ex.answer,
+                "question": item["ex"].question,
+                "answer": item["ex"].answer,
                 "pred": pred,
                 "reward": r,
             }
@@ -300,16 +322,8 @@ def evaluate_parallel(
 
     Uses batched evaluation with optimized batch sizes based on GPU memory.
     """
-    gpu_manager = get_gpu_manager()
-
-    # Determine optimal batch size based on GPU memory
-    if gpu_manager.num_gpus > 0:
-        # For 80GB GPUs, use larger batches; for 40GB, use smaller
-        total_memory = gpu_manager.get_gpu_memory(0) / (1024**3)  # GB
-        batch_size = 16 if total_memory >= 60 else 8
-    else:
-        batch_size = 4
-
+    # Use batch size from config
+    batch_size = int(cfg.evaluation.batch_size)
     logger.info(f"Using batch size {batch_size} for evaluation on {dataset}")
 
     if use_reward:
