@@ -7,6 +7,7 @@ from typing import Dict, Any, List, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.generation.logits_process import LogitsProcessorList
+from tqdm import tqdm
 
 from pita.models.catalog import resolve_model_id
 from pita.core.prompts import build_instruction_prompt
@@ -267,7 +268,12 @@ class HFModel:
         ]
 
         all_results = []
-        for i in range(0, len(built_prompts), batch_size):
+        num_batches = (len(built_prompts) + batch_size - 1) // batch_size
+        for i in tqdm(
+            range(0, len(built_prompts), batch_size),
+            total=num_batches,
+            desc="roll_in batches",
+        ):
             batch = built_prompts[i : i + batch_size]
             ids = self.tokenizer(batch, return_tensors="pt", padding=True).to(
                 self.model.device
@@ -315,7 +321,13 @@ class HFModel:
         max_length_for_gen = max_position_embeddings - max_new_tokens
 
         all_results = []
-        for i in range(0, len(contexts), batch_size):
+        num_batches = (len(contexts) + batch_size - 1) // batch_size
+        mode = "greedy" if greedy else "sampled"
+        for i in tqdm(
+            range(0, len(contexts), batch_size),
+            total=num_batches,
+            desc=f"continue ({mode}) batches",
+        ):
             batch = contexts[i : i + batch_size]
             ids = self.tokenizer(batch, return_tensors="pt", padding=True).to(
                 self.model.device

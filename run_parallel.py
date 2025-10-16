@@ -216,7 +216,7 @@ def main(cfg: DictConfig) -> None:
         if hasattr(cfg, "use_parallel_execution")
         else True
     )
-    use_parallel = parallel_exec_enabled and gpu_manager.num_gpus > 1
+    use_parallel = parallel_exec_enabled
 
     if use_parallel:
         logger.info(f"🚀 Using PARALLEL execution with {gpu_manager.num_gpus} GPUs")

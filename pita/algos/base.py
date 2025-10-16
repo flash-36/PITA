@@ -157,7 +157,7 @@ class ValueGuidedAlgorithms(AlgorithmBase):
             if hasattr(cfg, "parallel_generation")
             else True
         )
-        use_parallel = gpu_manager.num_gpus > 1 and parallel_enabled
+        use_parallel = parallel_enabled
 
         tracker = get_compute_tracker()
         with tracker.track_phase(f"data_generation_{dataset}"):
@@ -368,7 +368,11 @@ class ValueGuidedAlgorithms(AlgorithmBase):
 
             # PHASE 2: Prepare contexts for continuation
             contexts_to_continue = []
-            for ex, rollout in zip(examples, rollouts):
+            for ex, rollout in tqdm(
+                zip(examples, rollouts),
+                total=len(examples),
+                desc=f"Worker {worker_id}: preparing contexts",
+            ):
                 built_prompt = rollout["prompt"]
                 prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
                 context_token_ids = rollout["context_ids"].tolist()
@@ -772,7 +776,7 @@ class PostTrainingAlgorithms(AlgorithmBase):
             if hasattr(cfg, "parallel_generation")
             else True
         )
-        use_parallel = gpu_manager.num_gpus > 1 and parallel_enabled
+        use_parallel = parallel_enabled
 
         tracker = get_compute_tracker()
         with tracker.track_phase(f"data_generation_{dataset}"):
@@ -1013,13 +1017,14 @@ class PostTrainingAlgorithms(AlgorithmBase):
                 batch_size=reward_batch_size,
             )
 
-            # PHASE 1: Generate all samples first
             gen_cfg = model.gen_cfg
-            logger.info(f"Worker {worker_id} processing {len(examples)} examples")
+            batch_size = int(cfg.algos[self.algo_key].batch_size)
+            logger.info(
+                f"🔄 Worker {worker_id} processing {len(examples)} examples with batch_size={batch_size}"
+            )
 
-            # Collect all generated samples for batch scoring
-            generated_samples = []
-
+            # PHASE 1: Build all prompts
+            prompts_to_generate = []
             for ex in examples:
                 built = build_instruction_prompt(
                     ex["prompt"],
@@ -1027,32 +1032,45 @@ class PostTrainingAlgorithms(AlgorithmBase):
                     use_chat_template=model.gen_cfg.use_chat_template,
                 )
                 for _ in range(samples_per_example):
-                    y_a = model.continue_from_context(
-                        built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
-                    )
-                    y_b = model.continue_from_context(
-                        built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
-                    )
-                    # Store for batch scoring
-                    generated_samples.append(
-                        {
-                            "ex": ex,
-                            "y_a": y_a,
-                            "y_b": y_b,
-                        }
-                    )
+                    prompts_to_generate.append({"ex": ex, "built": built})
 
             logger.info(
-                f"Worker {worker_id} generated {len(generated_samples)} samples, now batch scoring..."
+                f"🔄 Worker {worker_id} prepared {len(prompts_to_generate)} prompts, now batching generations..."
             )
 
-            # PHASE 2: Batch score all samples at once
+            # PHASE 2: Batch generate y_a (sampled)
+            all_prompts = [item["built"] for item in prompts_to_generate]
+            y_a_list = model.continue_from_context_batch(
+                all_prompts, gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+            )
+
+            # PHASE 3: Batch generate y_b (sampled)
+            y_b_list = model.continue_from_context_batch(
+                all_prompts, gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+            )
+
+            # PHASE 4: Assemble generated samples
+            generated_samples = []
+            for item, y_a, y_b in zip(prompts_to_generate, y_a_list, y_b_list):
+                generated_samples.append(
+                    {
+                        "ex": item["ex"],
+                        "y_a": y_a,
+                        "y_b": y_b,
+                    }
+                )
+
+            logger.info(
+                f"✅ Worker {worker_id} generated {len(generated_samples)} samples, now batch scoring..."
+            )
+
+            # PHASE 5: Batch score all samples at once
             score_pairs = [
                 (s["ex"]["question"], s["y_a"], s["y_b"]) for s in generated_samples
             ]
             scores = reward_scorer.score_batch(score_pairs)
 
-            # PHASE 3: Create records with scores
+            # PHASE 6: Create records with scores
             records = []
             for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
                 records.append(
@@ -1068,7 +1086,7 @@ class PostTrainingAlgorithms(AlgorithmBase):
                     }
                 )
 
-            logger.info(f"Worker {worker_id} generated {len(records)} records")
+            logger.info(f"✅ Worker {worker_id} generated {len(records)} records")
             result_queue.put(records)
 
         except Exception as e:
