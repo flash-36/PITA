@@ -611,21 +611,32 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         )
 
         samples_per_example = int(cfg.data_collection.samples_per_example)
+        batch_size = int(cfg.algos[self.algo_key].batch_size)
 
-        # PHASE 1: Generate all samples first
         max_examples = int(cfg.data_collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
 
-        generated_samples = []
-
-        for ex in tqdm(
-            islice(ds.iter(), limit),
-            total=limit,
-            desc=f"{self.algo_key}:{dataset} (generating)",
-        ):
+        # Collect all examples first
+        examples = []
+        for ex in islice(ds.iter(), limit):
             prompt = ds.hydrate_prompt(ex.question)
-            rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
+            examples.append({"ex": ex, "prompt": prompt})
 
+        logger.info(
+            f"🔄 Processing {len(examples)} examples with batch_size={batch_size}"
+        )
+
+        # PHASE 1: Batch all roll_in calls
+        prompts = [item["prompt"] for item in examples]
+        rollouts = model.roll_in_batch(
+            prompts, gen_cfg.max_new_tokens, batch_size=batch_size
+        )
+
+        # PHASE 2: Prepare contexts for continuation
+        contexts_to_continue = []
+        for item, rollout in tqdm(
+            zip(examples, rollouts), total=len(examples), desc="Preparing contexts"
+        ):
             built_prompt = rollout["prompt"]
             prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
             context_token_ids = rollout["context_ids"].tolist()
@@ -657,36 +668,66 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                 )
 
                 remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
-                y_ref = model.continue_from_context(
-                    context_text, max_new_tokens=remaining_token_budget, greedy=True
-                )
-                y_sample = model.continue_from_context(
-                    context_text, max_new_tokens=remaining_token_budget, greedy=False
-                )
-
-                y_a = solution_prefix_text + y_ref
-                y_b = solution_prefix_text + y_sample
-
-                # Store for batch scoring
-                generated_samples.append(
+                contexts_to_continue.append(
                     {
-                        "ex": ex,
-                        "prompt": prompt,
-                        "y_a": y_a,
-                        "y_b": y_b,
-                        "cutoff_tokens": cutoff_tokens,
+                        "ex": item["ex"],
+                        "prompt": item["prompt"],
+                        "context_text": context_text,
                         "solution_prefix_text": solution_prefix_text,
+                        "cutoff_tokens": cutoff_tokens,
+                        "remaining_token_budget": remaining_token_budget,
                     }
                 )
 
-        # PHASE 2: Batch score all samples
-        logger.info(f"Generated {len(generated_samples)} samples, now batch scoring...")
+        if not contexts_to_continue:
+            logger.info("⚠️ No valid contexts (all rollouts too short)")
+            return []
+
+        logger.info(
+            f"🔄 Prepared {len(contexts_to_continue)} contexts, now batching continuations..."
+        )
+
+        # PHASE 3: Batch all continue_from_context calls
+        all_contexts = [item["context_text"] for item in contexts_to_continue]
+        min_remaining_tokens = min(
+            item["remaining_token_budget"] for item in contexts_to_continue
+        )
+
+        greedy_continuations = model.continue_from_context_batch(
+            all_contexts, min_remaining_tokens, greedy=True, batch_size=batch_size
+        )
+        sampled_continuations = model.continue_from_context_batch(
+            all_contexts, min_remaining_tokens, greedy=False, batch_size=batch_size
+        )
+
+        # PHASE 4: Assemble generated samples
+        generated_samples = []
+        for ctx, y_ref, y_sample in zip(
+            contexts_to_continue, greedy_continuations, sampled_continuations
+        ):
+            y_a = ctx["solution_prefix_text"] + y_ref
+            y_b = ctx["solution_prefix_text"] + y_sample
+            generated_samples.append(
+                {
+                    "ex": ctx["ex"],
+                    "prompt": ctx["prompt"],
+                    "y_a": y_a,
+                    "y_b": y_b,
+                    "cutoff_tokens": ctx["cutoff_tokens"],
+                    "solution_prefix_text": ctx["solution_prefix_text"],
+                }
+            )
+
+        # PHASE 5: Batch score all samples
+        logger.info(
+            f"✅ Generated {len(generated_samples)} samples, now batch scoring..."
+        )
         score_pairs = [
             (s["ex"].question, s["y_a"], s["y_b"]) for s in generated_samples
         ]
         scores = reward_scorer.score_batch(score_pairs)
 
-        # PHASE 3: Create records with scores
+        # PHASE 6: Create records with scores
         records: List[Dict[str, Any]] = []
         for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
             records.append(
@@ -829,49 +870,69 @@ class PostTrainingAlgorithms(AlgorithmBase):
         )
 
         samples_per_example = int(cfg.data_collection.samples_per_example)
+        batch_size = int(cfg.algos[self.algo_key].batch_size)
 
-        # PHASE 1: Generate all samples first
         max_examples = int(cfg.data_collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
 
-        generated_samples = []
-
-        for ex in tqdm(
-            islice(ds.iter(), limit),
-            total=limit,
-            desc=f"{self.algo_key}:{dataset} (generating)",
-        ):
+        # Collect all examples first
+        examples = []
+        for ex in islice(ds.iter(), limit):
             prompt = ds.hydrate_prompt(ex.question)
             built = build_instruction_prompt(
                 prompt,
                 tokenizer=model.tokenizer,
                 use_chat_template=model.gen_cfg.use_chat_template,
             )
-            for _ in range(samples_per_example):
-                y_a = model.continue_from_context(
-                    built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
-                )
-                y_b = model.continue_from_context(
-                    built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
-                )
-                # Store for batch scoring
-                generated_samples.append(
-                    {
-                        "ex": ex,
-                        "prompt": prompt,
-                        "y_a": y_a,
-                        "y_b": y_b,
-                    }
-                )
+            examples.append({"ex": ex, "prompt": prompt, "built": built})
 
-        # PHASE 2: Batch score all samples
-        logger.info(f"Generated {len(generated_samples)} samples, now batch scoring...")
+        logger.info(
+            f"🔄 Processing {len(examples)} examples with batch_size={batch_size}"
+        )
+
+        # PHASE 1: Build all prompts
+        prompts_to_generate = []
+        for item in examples:
+            for _ in range(samples_per_example):
+                prompts_to_generate.append(item)
+
+        logger.info(
+            f"🔄 Prepared {len(prompts_to_generate)} prompts, now batching generations..."
+        )
+
+        # PHASE 2: Batch generate y_a (sampled)
+        all_prompts = [item["built"] for item in prompts_to_generate]
+        y_a_list = model.continue_from_context_batch(
+            all_prompts, gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+        )
+
+        # PHASE 3: Batch generate y_b (sampled)
+        y_b_list = model.continue_from_context_batch(
+            all_prompts, gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+        )
+
+        # PHASE 4: Assemble generated samples
+        generated_samples = []
+        for item, y_a, y_b in zip(prompts_to_generate, y_a_list, y_b_list):
+            generated_samples.append(
+                {
+                    "ex": item["ex"],
+                    "prompt": item["prompt"],
+                    "y_a": y_a,
+                    "y_b": y_b,
+                }
+            )
+
+        # PHASE 5: Batch score all samples
+        logger.info(
+            f"✅ Generated {len(generated_samples)} samples, now batch scoring..."
+        )
         score_pairs = [
             (s["ex"].question, s["y_a"], s["y_b"]) for s in generated_samples
         ]
         scores = self._reward.score_batch(score_pairs)
 
-        # PHASE 3: Create records with scores
+        # PHASE 6: Create records with scores
         records: List[Dict[str, Any]] = []
         for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
             records.append(
