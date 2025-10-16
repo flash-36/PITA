@@ -111,7 +111,7 @@ class ParallelJobExecutor:
             List of job results
         """
         if self.gpu_manager.num_gpus <= 1:
-            return self.execute_jobs_sequential(jobs, job_executor)
+            return self.execute_jobs_sequential(jobs, job_executor, executor_args)
 
         logger.info(
             f"Executing {len(jobs)} jobs in parallel across {self.gpu_manager.num_gpus} GPUs"
