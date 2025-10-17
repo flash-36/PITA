@@ -209,14 +209,14 @@ class QSharpTrainer:
         if not hasattr(self, "_last_logged_batch") or self._last_logged_batch != len(
             batch
         ):
-            capped_at = (
+            effective_len = (
                 min(max_len_in_batch, self.max_length)
                 if self.max_length > 0
                 else max_len_in_batch
             )
             logger.debug(
                 f"QSharp Batch Info: batch_size={len(batch)}, max_seq_len={max_len_in_batch}, "
-                f"capped_at={capped_at}"
+                f"padded_to={effective_len}"
             )
             self._last_logged_batch = len(batch)
 
