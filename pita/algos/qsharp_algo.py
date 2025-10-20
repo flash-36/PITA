@@ -12,7 +12,13 @@ from itertools import islice
 from pita.core.registry import register_algorithm
 from .base import ValueGuidedAlgorithms
 from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
-from pita.core.io import get_run_root, get_snapshot_paths, merge_and_save_hf
+from pita.core.io import (
+    get_run_root,
+    get_snapshot_paths,
+    merge_and_save_hf,
+    mark_phase_complete,
+    check_phase_complete,
+)
 from pita.core.compute_tracker import get_compute_tracker, reset_compute_tracker
 from pita.trainers import QSharpTrainer
 from datasets import load_from_disk
@@ -260,75 +266,99 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         )
         if not hf_dir.exists():
             raise FileNotFoundError(f"Missing QSharp dataset: {hf_dir}")
-        ds = load_from_disk(str(hf_dir))
+
+        ckpt_dir = self.get_ckpt_dir(run_root, dataset, family, round_idx)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         ref = self._build_model(cfg, ref_model)
         verifiable = {"AIME", "GSM8K", "MATH"}
         loss_type = "bce" if dataset in verifiable else "mle"
-        classifier = ValueClassifier(
-            cls_model,
-            tokenizer=ref.tokenizer,
-            device=ref.model.device,
-            loss_type=loss_type,
-            num_atoms=int(self.cfg.num_atoms),
-            V_min=float(self.cfg.V_min),
-            V_max=float(self.cfg.V_max),
-            attn_impl=str(cfg.system.attn_impl),
-            dtype=str(cfg.system.amp_dtype),
-            gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
-        )
-        self.maybe_load_classifier_from_prev_round(
-            classifier,
-            run_root=run_root,
-            dataset=dataset,
-            family=family,
-            round_idx=round_idx,
-            device=ref.model.device,
-        )
 
-        trainer = QSharpTrainer(
-            classifier=classifier,
-            tokenizer=ref.tokenizer,
-            batch_size=int(self.cfg.batch_size),
-            max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
-            num_workers=int(self.cfg.num_workers),
-            lr=float(self.cfg.lr),
-            weight_decay=float(self.cfg.weight_decay),
-            grad_clip=float(self.cfg.grad_clip),
-            pad_token_id=ref.pad_token_id,
-            micro_batch_size=int(cfg.training.micro_batch_size),
-            amp_dtype=str(cfg.system.amp_dtype),
-            clear_cache_interval=int(cfg.system.clear_cache_interval),
-        )
-        # Convert dataset rows to classifier training examples if needed
-        # Expecting keys: input_ids, target_ids, rewards, loss_weights
-        sample = ds[0] if len(ds) > 0 else None
-        need_convert = sample is not None and not all(
-            k in sample for k in ("input_ids", "target_ids", "rewards", "loss_weights")
-        )
-        if need_convert:
-            ds = convert_qsharp_rows_to_classifier_dataset(
-                ds,
+        # Phase 1: Classifier Training
+        if check_phase_complete(
+            "classifier_training", self.algo_key, dataset, family, round_idx, run_root
+        ):
+            logger.info(
+                "⏭️  Phase 1: Classifier training already complete, loading checkpoint..."
+            )
+            stats = {"steps": 0, "loss": 0.0}
+        else:
+            logger.info("🔄 Phase 1: Training classifier...")
+            ds = load_from_disk(str(hf_dir))
+
+            classifier = ValueClassifier(
+                cls_model,
                 tokenizer=ref.tokenizer,
-                use_chat_template=ref.gen_cfg.use_chat_template,
+                device=ref.model.device,
+                loss_type=loss_type,
+                num_atoms=int(self.cfg.num_atoms),
+                V_min=float(self.cfg.V_min),
+                V_max=float(self.cfg.V_max),
+                attn_impl=str(cfg.system.attn_impl),
+                dtype=str(cfg.system.amp_dtype),
+                gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
+            )
+            self.maybe_load_classifier_from_prev_round(
+                classifier,
+                run_root=run_root,
+                dataset=dataset,
+                family=family,
+                round_idx=round_idx,
+                device=ref.model.device,
             )
 
-        loader = trainer.create_loader(ds)
-        with tracker.track_phase(f"training_{dataset}"):
-            stats = trainer.train(loader, num_epochs=int(self.cfg.epochs))
+            trainer = QSharpTrainer(
+                classifier=classifier,
+                tokenizer=ref.tokenizer,
+                batch_size=int(self.cfg.batch_size),
+                max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
+                num_workers=int(self.cfg.num_workers),
+                lr=float(self.cfg.lr),
+                weight_decay=float(self.cfg.weight_decay),
+                grad_clip=float(self.cfg.grad_clip),
+                pad_token_id=ref.pad_token_id,
+                micro_batch_size=int(cfg.training.micro_batch_size),
+                amp_dtype=str(cfg.system.amp_dtype),
+                clear_cache_interval=int(cfg.system.clear_cache_interval),
+            )
+            # Convert dataset rows to classifier training examples if needed
+            sample = ds[0] if len(ds) > 0 else None
+            need_convert = sample is not None and not all(
+                k in sample
+                for k in ("input_ids", "target_ids", "rewards", "loss_weights")
+            )
+            if need_convert:
+                ds = convert_qsharp_rows_to_classifier_dataset(
+                    ds,
+                    tokenizer=ref.tokenizer,
+                    use_chat_template=ref.gen_cfg.use_chat_template,
+                )
 
-        ckpt_dir = self.get_ckpt_dir(run_root, dataset, family, round_idx)
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(classifier.state_dict(), str(ckpt_dir / "classifier.pt"))
+            loader = trainer.create_loader(ds)
+            with tracker.track_phase(f"training_{dataset}"):
+                stats = trainer.train(loader, num_epochs=int(self.cfg.epochs))
 
-        # Free memory before loading for evaluation
-        logger.info("🧹 Clearing trainer, loader, and classifier before evaluation...")
-        del trainer, loader, ds, classifier
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            torch.save(classifier.state_dict(), str(ckpt_dir / "classifier.pt"))
+            mark_phase_complete(
+                "classifier_training",
+                self.algo_key,
+                dataset,
+                family,
+                round_idx,
+                run_root,
+            )
 
-        # Reload classifier from checkpoint for evaluation
+            # Free memory before loading for evaluation
+            logger.info(
+                "🧹 Clearing trainer, loader, and classifier before evaluation..."
+            )
+            del trainer, loader, ds, classifier
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+        # Phase 2: Evaluation - Load classifier from checkpoint
+        logger.info("🔮 Phase 2: Evaluating with trained classifier...")
         reloaded = ValueClassifier(
             cls_model,
             tokenizer=ref.tokenizer,

@@ -8,6 +8,9 @@ experiment:
 # Number of iterative rounds: generate -> train -> regenerate -> train ...
 rounds_of_training: 2
 
+# Resume from a previous run directory (set via command line: resume_from=/path/to/run)
+resume_from: null
+
 # System configuration
 system:
   dtype: bfloat16
@@ -24,19 +27,19 @@ generation:
 
 # Training hyperparameters
 training:
-  micro_batch_size: 64  # Micro-batching for gradient accumulation (helps with memory)
+  micro_batch_size: 2  # Micro-batching for gradient accumulation (helps with memory)
   gradient_checkpointing: true  # Enable to save memory at cost of speed
   # Which datasets to train on
   datasets:
     - GSM8K
-    # - TLDR
+    - TLDR
     - IMDBGen
 
 # Data collection hyperparameters
 data_collection:
   samples_per_example: 4
   seed: 42
-  max_examples: 16
+  max_examples: 0
   reward_batch_size: 32  # Increased from 2 to 32 for better GPU utilization
   bradley_terry_sampling: true
   bradley_terry_beta: 1.0
@@ -44,9 +47,9 @@ data_collection:
 # Evaluation configuration
 evaluation:
   # Evaluate guided decoding at multiple eta values
-  etas: [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+  etas: [0.25, 0.5, 1.0, 4.0]
   # Number of samples for majority voting evaluation
-  num_samples: 16
+  num_samples: 8
   # Batch size for evaluation generation
   batch_size: 64
   # For each training dataset, which datasets to evaluate on

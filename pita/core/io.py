@@ -58,3 +58,69 @@ def merge_and_save_hf(
         merged = new_ds
     merged.save_to_disk(str(cur_hf))
     merged.to_csv(str(cur_csv))
+
+
+def check_data_generated(
+    algo_key: str,
+    dataset: str,
+    family: str,
+    round_idx: int,
+    run_root: Path,
+) -> bool:
+    """Check if data generation is complete for a job."""
+    _, cur_hf, _ = get_snapshot_paths(algo_key, dataset, family, round_idx, run_root)
+    return cur_hf.exists()
+
+
+def check_training_completed(
+    algo_key: str,
+    dataset: str,
+    family: str,
+    round_idx: int,
+    run_root: Path,
+) -> bool:
+    """Check if training is complete for a job."""
+    family_cap = str(family).capitalize()
+    r = int(round_idx) + 1
+    result_path = (
+        run_root / "results" / algo_key / family_cap / dataset / f"r{r}" / "result.json"
+    )
+    return result_path.exists()
+
+
+def mark_phase_complete(
+    phase_name: str,
+    algo_key: str,
+    dataset: str,
+    family: str,
+    round_idx: int,
+    run_root: Path,
+) -> None:
+    """Mark a training phase as complete by creating a marker file."""
+    family_cap = str(family).capitalize()
+    r = int(round_idx) + 1
+    phase_marker_dir = run_root / "models" / algo_key / f"{dataset}_{family_cap}_r{r}"
+    phase_marker_dir.mkdir(parents=True, exist_ok=True)
+    marker_file = phase_marker_dir / f".{phase_name}_complete"
+    marker_file.touch()
+
+
+def check_phase_complete(
+    phase_name: str,
+    algo_key: str,
+    dataset: str,
+    family: str,
+    round_idx: int,
+    run_root: Path,
+) -> bool:
+    """Check if a training phase is complete by checking for marker file."""
+    family_cap = str(family).capitalize()
+    r = int(round_idx) + 1
+    marker_file = (
+        run_root
+        / "models"
+        / algo_key
+        / f"{dataset}_{family_cap}_r{r}"
+        / f".{phase_name}_complete"
+    )
+    return marker_file.exists()

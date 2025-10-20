@@ -38,27 +38,59 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
     Args:
         job: Job to execute
         device_id: GPU device ID (or -1 for CPU)
-        args: Tuple of (cfg_dict, run_root_str) passed from main
+        args: Tuple of (cfg_dict, run_root_str, state_manager_dict) passed from main
 
     Returns:
         Job result
     """
     from omegaconf import OmegaConf
     from pathlib import Path
+    from pita.core.job_state import JobStateManager, JobState
+    from pita.core.io import create_subdir
+    import json
 
     # Import algorithms to trigger registration in worker process
     import pita.algos
     import pita.datasets
 
     # Unpack arguments
-    cfg_dict, run_root_str = args
+    cfg_dict, run_root_str, state_manager_dict = args
 
     # Reconstruct OmegaConf object from dict
     cfg = OmegaConf.create(cfg_dict)
     run_root = Path(run_root_str)
 
+    # Reconstruct state manager
+    state_manager = JobStateManager(run_root)
+    if state_manager_dict:
+        state_manager.states = state_manager_dict
+
     try:
         logger.info(f"🔧 Executing job: {job} on device {device_id}")
+
+        # Check current state
+        current_state = state_manager.get_state(job.job_id)
+
+        # Skip if already completed
+        if current_state == JobState.TRAINING_COMPLETED:
+            logger.info(f"⏭️  Skipping completed job: {job}")
+            # Load existing result
+            out_dir = create_subdir(
+                run_root,
+                [
+                    "results",
+                    job.algo_key,
+                    f"{job.family_name}",
+                    job.dataset_name,
+                    f"r{job.round_idx + 1}",
+                ],
+            )
+            result_file = out_dir / "result.json"
+            result = {}
+            if result_file.exists():
+                with open(result_file, "r") as f:
+                    result = json.load(f)
+            return JobResult(job=job, success=True, result=result)
 
         # Restrict this job to only use its assigned GPU
         # This prevents conflicts when multiple jobs run in parallel
@@ -88,17 +120,21 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
             round_idx=job.round_idx,
         )
 
-        # Generate data
-        logger.info(f"🧪 Generating data: {job}")
-        algo.generate_data(
-            cfg=cfg,
-            ref_model=ref_for_train,
-            cls_model=job.value_model_alias,
-            dataset=job.dataset_name,
-            family=job.family_name,
-            round_idx=job.round_idx,
-            run_root=run_root,
-        )
+        # Generate data (skip if already done)
+        if current_state == JobState.DATA_GENERATED:
+            logger.info(f"⏭️  Skipping data generation (already done): {job}")
+        else:
+            logger.info(f"🧪 Generating data: {job}")
+            algo.generate_data(
+                cfg=cfg,
+                ref_model=ref_for_train,
+                cls_model=job.value_model_alias,
+                dataset=job.dataset_name,
+                family=job.family_name,
+                round_idx=job.round_idx,
+                run_root=run_root,
+            )
+            state_manager.update_state(job.job_id, JobState.DATA_GENERATED)
 
         # Train
         logger.info(f"🏋️ Training: {job}")
@@ -142,6 +178,7 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
 
         save_json(out_dir / "result.json", result or {})
 
+        state_manager.update_state(job.job_id, JobState.TRAINING_COMPLETED)
         logger.info(f"✅ Completed job: {job}")
 
         # Explicit cleanup to free memory before returning
@@ -162,6 +199,8 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
 
         traceback.print_exc()
 
+        state_manager.update_state(job.job_id, JobState.FAILED)
+
         # Cleanup on failure too
         if "algo" in locals():
             del algo
@@ -178,7 +217,45 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Main training loop with parallel execution."""
-    run_root = get_run_root()
+    from pathlib import Path
+    from pita.core.job_state import JobStateManager
+    from datetime import datetime
+
+    # Check if resuming from a previous run
+    resume_from = cfg.get("resume_from", None)
+    if resume_from:
+        resume_path = Path(resume_from)
+        if not resume_path.exists():
+            raise ValueError(f"Resume path does not exist: {resume_from}")
+
+        logger.info(f"🔄 Resuming from: {resume_from}")
+
+        # Load config from the resume directory
+        original_config_path = resume_path / ".hydra" / "config.yaml"
+        if not original_config_path.exists():
+            raise ValueError(f"No config found at: {original_config_path}")
+
+        original_cfg = OmegaConf.load(original_config_path)
+
+        # Merge current config overrides into original config
+        # Remove resume_from from overrides to avoid recursion
+        current_overrides = OmegaConf.to_container(cfg, resolve=False)
+        current_overrides.pop("resume_from", None)
+
+        # Merge overrides into original config
+        cfg = OmegaConf.merge(original_cfg, current_overrides)
+
+        # Save the updated config with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        resume_config_path = resume_path / ".hydra" / f"config_resume_{timestamp}.yaml"
+        resume_config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(resume_config_path, "w") as f:
+            OmegaConf.save(cfg, f)
+        logger.info(f"💾 Saved resumed config to: {resume_config_path}")
+
+        run_root = resume_path
+    else:
+        run_root = get_run_root()
 
     logger.add(
         str(run_root / "run.log"),
@@ -186,6 +263,15 @@ def main(cfg: DictConfig) -> None:
         level="INFO",
         enqueue=True,
     )
+
+    if resume_from:
+        logger.info("=" * 80)
+        logger.info(f"🔄 RESUMING RUN FROM: {resume_from}")
+        logger.info(
+            f"⏰ Resume timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        logger.info("=" * 80)
+
     logger.info("🧾 Loaded config:\n{}", OmegaConf.to_yaml(cfg, resolve=True))
 
     exp_name = cfg.experiment.name
@@ -227,6 +313,10 @@ def main(cfg: DictConfig) -> None:
     all_jobs = create_job_list(cfg)
     logger.info(f"📋 Created {len(all_jobs)} training jobs")
 
+    # Initialize state manager
+    state_manager = JobStateManager(run_root)
+    state_manager.initialize_from_jobs(all_jobs)
+
     # Group jobs by round (for dependency handling)
     job_batches = group_jobs_by_dependencies(all_jobs)
     logger.info(f"📦 Grouped into {len(job_batches)} batches by round")
@@ -238,7 +328,8 @@ def main(cfg: DictConfig) -> None:
     # Convert config to plain dict for pickling (OmegaConf objects don't pickle well with spawn)
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
     run_root_str = str(run_root)
-    executor_args = (cfg_dict, run_root_str)
+    state_manager_dict = state_manager.states
+    executor_args = (cfg_dict, run_root_str, state_manager_dict)
 
     for batch_idx, batch in enumerate(job_batches):
         logger.info(

@@ -20,7 +20,13 @@ from pita.core.prompts import build_instruction_prompt
 
 from pita.core.registry import register_algorithm
 from .base import PostTrainingAlgorithms
-from pita.core.io import get_run_root, get_snapshot_paths, merge_and_save_hf
+from pita.core.io import (
+    get_run_root,
+    get_snapshot_paths,
+    merge_and_save_hf,
+    mark_phase_complete,
+    check_phase_complete,
+)
 from pita.core.compute_tracker import get_compute_tracker, reset_compute_tracker
 from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
 
@@ -172,109 +178,171 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
         if not hf_dir.exists():
             raise FileNotFoundError(f"Missing GRPO-HF dataset: {hf_dir}")
 
-        logger.info("📚 Training proxy reward model...")
-        ref = self._build_model(cfg, ref_model)
-
-        proxy_loss_type = str(self.cfg.proxy_loss_type)
-
-        classifier = ValueClassifier(
-            cls_model,
-            tokenizer=ref.tokenizer,
-            device=ref.model.device,
-            loss_type=proxy_loss_type,
-            num_atoms=int(self.cfg.num_atoms),
-            V_min=float(self.cfg.V_min),
-            V_max=float(self.cfg.V_max),
-            attn_impl=str(cfg.system.attn_impl),
-            dtype=str(cfg.system.amp_dtype),
-            gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
-        )
-
-        prev_classifier_loaded = self.maybe_load_classifier_from_prev_round(
-            classifier,
-            run_root=run_root,
-            dataset=dataset,
-            family=family,
-            round_idx=round_idx,
-            device=ref.model.device,
-        )
-
-        cls_trainer = PITATrainer(
-            classifier,
-            tokenizer=ref.tokenizer,
-            batch_size=int(self.cfg.batch_size),
-            max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
-            num_workers=int(self.cfg.num_workers),
-            lr=float(self.cfg.proxy_lr),
-            weight_decay=float(self.cfg.weight_decay),
-            grad_clip=float(self.cfg.grad_clip),
-            pad_token_id=int(ref.pad_token_id),
-            micro_batch_size=int(cfg.training.micro_batch_size),
-            amp_dtype=str(cfg.system.amp_dtype),
-            clear_cache_interval=int(cfg.system.clear_cache_interval),
-        )
+        ckpt_dir = self.get_ckpt_dir(run_root, dataset, family, round_idx)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         from datasets import load_from_disk
 
         ds_raw = load_from_disk(str(hf_dir))
-        ds_converted = convert_pita_rows_to_classifier_dataset(
-            ds_raw,
-            tokenizer=ref.tokenizer,
-            use_chat_template=ref.gen_cfg.use_chat_template,
-        )
+        ref = self._build_model(cfg, ref_model)
 
-        cls_loader = cls_trainer.create_loader(ds_converted)
-        with tracker.track_phase(f"proxy_rm_training_{dataset}"):
-            cls_stats = cls_trainer.train(
-                cls_loader, num_epochs=int(self.cfg.proxy_epochs)
+        # Phase 1: Proxy RM Training
+        if check_phase_complete(
+            "proxy_rm_training", self.algo_key, dataset, family, round_idx, run_root
+        ):
+            logger.info(
+                "⏭️  Phase 1: Proxy RM training already complete, loading checkpoint..."
+            )
+            proxy_loss_type = str(self.cfg.proxy_loss_type)
+            classifier = ValueClassifier(
+                cls_model,
+                tokenizer=ref.tokenizer,
+                device=ref.model.device,
+                loss_type=proxy_loss_type,
+                num_atoms=int(self.cfg.num_atoms),
+                V_min=float(self.cfg.V_min),
+                V_max=float(self.cfg.V_max),
+                attn_impl=str(cfg.system.attn_impl),
+                dtype=str(cfg.system.amp_dtype),
+                gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
+            )
+            classifier.load_state_dict(
+                torch.load(
+                    str(ckpt_dir / "proxy_reward_model.pt"),
+                    map_location=ref.model.device,
+                )
+            )
+        else:
+            logger.info("📚 Phase 1: Training proxy reward model...")
+            proxy_loss_type = str(self.cfg.proxy_loss_type)
+
+            classifier = ValueClassifier(
+                cls_model,
+                tokenizer=ref.tokenizer,
+                device=ref.model.device,
+                loss_type=proxy_loss_type,
+                num_atoms=int(self.cfg.num_atoms),
+                V_min=float(self.cfg.V_min),
+                V_max=float(self.cfg.V_max),
+                attn_impl=str(cfg.system.attn_impl),
+                dtype=str(cfg.system.amp_dtype),
+                gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
             )
 
-        ckpt_dir = self.get_ckpt_dir(run_root, dataset, family, round_idx)
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(classifier.state_dict(), str(ckpt_dir / "proxy_reward_model.pt"))
+            prev_classifier_loaded = self.maybe_load_classifier_from_prev_round(
+                classifier,
+                run_root=run_root,
+                dataset=dataset,
+                family=family,
+                round_idx=round_idx,
+                device=ref.model.device,
+            )
 
-        logger.info("💪 Re-scoring samples with proxy reward model...")
-        grpo_ds = self._rescore_samples_with_proxy(ds_raw, classifier, ref)
+            cls_trainer = PITATrainer(
+                classifier,
+                tokenizer=ref.tokenizer,
+                batch_size=int(self.cfg.batch_size),
+                max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
+                num_workers=int(self.cfg.num_workers),
+                lr=float(self.cfg.proxy_lr),
+                weight_decay=float(self.cfg.weight_decay),
+                grad_clip=float(self.cfg.grad_clip),
+                pad_token_id=int(ref.pad_token_id),
+                micro_batch_size=int(cfg.training.micro_batch_size),
+                amp_dtype=str(cfg.system.amp_dtype),
+                clear_cache_interval=int(cfg.system.clear_cache_interval),
+            )
+
+            ds_converted = convert_pita_rows_to_classifier_dataset(
+                ds_raw,
+                tokenizer=ref.tokenizer,
+                use_chat_template=ref.gen_cfg.use_chat_template,
+            )
+
+            cls_loader = cls_trainer.create_loader(ds_converted)
+            with tracker.track_phase(f"proxy_rm_training_{dataset}"):
+                cls_stats = cls_trainer.train(
+                    cls_loader, num_epochs=int(self.cfg.proxy_epochs)
+                )
+
+            torch.save(classifier.state_dict(), str(ckpt_dir / "proxy_reward_model.pt"))
+            mark_phase_complete(
+                "proxy_rm_training", self.algo_key, dataset, family, round_idx, run_root
+            )
+
+            del cls_trainer, cls_loader, ds_converted
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # Phase 2: Data Rescoring
+        rescored_data_path = ckpt_dir / "grpo_ds_rescored.hf"
+        if check_phase_complete(
+            "data_rescoring", self.algo_key, dataset, family, round_idx, run_root
+        ):
+            logger.info("⏭️  Phase 2: Data rescoring already complete, loading...")
+            grpo_ds = GRPODataset.load_from_disk(str(rescored_data_path))
+        else:
+            logger.info("💪 Phase 2: Re-scoring samples with proxy reward model...")
+            grpo_ds = self._rescore_samples_with_proxy(ds_raw, classifier, ref)
+            grpo_ds.save_to_disk(str(rescored_data_path))
+            mark_phase_complete(
+                "data_rescoring", self.algo_key, dataset, family, round_idx, run_root
+            )
 
         # Free up memory before loading policy and reference models
         logger.info("🧹 Clearing classifier and ref model to free memory...")
-        del classifier, ref, cls_trainer, cls_loader, ds_raw, ds_converted
-        torch.cuda.empty_cache()
+        del classifier, ref, ds_raw
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-        logger.info("🏋️ Training policy with GRPO...")
-        policy = self._build_model(cfg, ref_model)
-        reference = self._build_model(cfg, ref_model)
+        # Phase 3: GRPO Policy Training
+        if check_phase_complete(
+            "grpo_training", self.algo_key, dataset, family, round_idx, run_root
+        ):
+            logger.info(
+                "⏭️  Phase 3: GRPO training already complete, loading checkpoint..."
+            )
+            eval_model = self._build_model(cfg, str(ckpt_dir))
+            stats = {"steps": 0, "loss": 0.0}
+        else:
+            logger.info("🏋️ Phase 3: Training policy with GRPO...")
+            policy = self._build_model(cfg, ref_model)
+            reference = self._build_model(cfg, ref_model)
 
-        trainer = GRPOTrainer(
-            policy=policy,
-            reference=reference,
-            grpo_cfg=self.cfg,
-            use_chat_template=bool(cfg.generation.use_chat_template),
-            micro_batch_size=int(cfg.training.micro_batch_size),
-            amp_dtype=str(cfg.system.amp_dtype),
-            clear_cache_interval=int(cfg.system.clear_cache_interval),
-            max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
-        )
+            trainer = GRPOTrainer(
+                policy=policy,
+                reference=reference,
+                grpo_cfg=self.cfg,
+                use_chat_template=bool(cfg.generation.use_chat_template),
+                micro_batch_size=int(cfg.training.micro_batch_size),
+                amp_dtype=str(cfg.system.amp_dtype),
+                clear_cache_interval=int(cfg.system.clear_cache_interval),
+                max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
+            )
 
-        loader = trainer.create_loader(grpo_ds, shuffle=True)
-        with tracker.track_phase(f"grpo_training_{dataset}"):
-            stats = trainer.train(loader, epochs=int(self.cfg.epochs))
+            loader = trainer.create_loader(grpo_ds, shuffle=True)
+            with tracker.track_phase(f"grpo_training_{dataset}"):
+                stats = trainer.train(loader, epochs=int(self.cfg.epochs))
 
-        trainer.policy.eval()
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
+            trainer.policy.eval()
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        if trainer.tokenizer.pad_token is None:
-            trainer.tokenizer.pad_token = trainer.tokenizer.eos_token
+            if trainer.tokenizer.pad_token is None:
+                trainer.tokenizer.pad_token = trainer.tokenizer.eos_token
 
-        trainer.policy.save_pretrained(str(ckpt_dir))
-        trainer.tokenizer.save_pretrained(str(ckpt_dir))
+            trainer.policy.save_pretrained(str(ckpt_dir))
+            trainer.tokenizer.save_pretrained(str(ckpt_dir))
+            mark_phase_complete(
+                "grpo_training", self.algo_key, dataset, family, round_idx, run_root
+            )
 
-        del policy.model
-        del policy
-        del trainer
-        torch.cuda.empty_cache()
+            del policy.model
+            del policy
+            del trainer
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        eval_model = self._build_model(cfg, str(ckpt_dir))
+            eval_model = self._build_model(cfg, str(ckpt_dir))
         eval_map: Dict[str, Dict[str, float]] = {}
         eval_targets = list(
             getattr(cfg.evaluation.datasets_by_train, dataset, [dataset])
