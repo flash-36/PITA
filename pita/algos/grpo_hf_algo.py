@@ -146,9 +146,16 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
             )
 
         if not records:
+            if hasattr(self, "_reward") and self._reward is not None:
+                self._reward.cleanup()
+                del self._reward
             return
         new_ds = Dataset.from_list(records)
         merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
+
+        if hasattr(self, "_reward") and self._reward is not None:
+            self._reward.cleanup()
+            del self._reward
 
     def run(
         self,

@@ -42,12 +42,13 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         cls_model: Optional[str] = None,
         run_root: Optional[Any] = None,
     ) -> None:
+        reward_scorer = None
         # For non-verifiable datasets, set up a reward model for scoring
         if dataset in {"TLDR", "IMDBGen"}:
             ds_cfg = cfg.datasets[dataset]
             rm_model = str(ds_cfg.reward_model)
             device = 0 if torch.cuda.is_available() else -1
-            self._reward = RewardScorer(
+            reward_scorer = RewardScorer(
                 rm_model,
                 bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
                 bt_beta=float(cfg.data_collection.bradley_terry_beta),
@@ -55,6 +56,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
                 dtype=str(cfg.system.dtype),
                 batch_size=int(cfg.data_collection.reward_batch_size),
             )
+            self._reward = reward_scorer
 
         snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
             self.algo_key, dataset, family, round_idx, run_root=run_root
@@ -104,134 +106,144 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
 
         samples_per_example = int(cfg.data_collection.samples_per_example)
         batch_size = int(cfg.algos[self.algo_key].batch_size)
+        chunk_size = int(getattr(cfg.data_collection, "chunk_size", 100))
 
         max_examples = int(cfg.data_collection.max_examples or 0)
         limit = max_examples if max_examples > 0 else len(ds)
 
-        # Collect all examples first
+        # Collect all examples (lightweight - just metadata)
         examples = []
         for ex in islice(ds.iter(), limit):
             prompt = ds.hydrate_prompt(ex.question)
             examples.append({"ex": ex, "prompt": prompt})
 
         logger.info(
-            f"🔄 Processing {len(examples)} examples with batch_size={batch_size}"
+            f"🔄 Processing {len(examples)} examples in chunks of {chunk_size} (batch_size={batch_size})"
         )
 
-        # PHASE 1: Batch all roll_in calls
-        prompts = [item["prompt"] for item in examples]
-        rollouts = model.roll_in_batch(
-            prompts, gen_cfg.max_new_tokens, batch_size=batch_size
-        )
+        all_records: List[Dict[str, Any]] = []
 
-        # PHASE 2: Prepare contexts for continuation
-        contexts_to_continue = []
-        for item, rollout in tqdm(
-            zip(examples, rollouts), total=len(examples), desc="Preparing contexts"
-        ):
-            built_prompt = rollout["prompt"]
-            prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
-            context_token_ids = rollout["context_ids"].tolist()
-            full_token_count = len(context_token_ids)
-            rollout_token_count = full_token_count - prompt_token_count
+        # Process examples in chunks to reduce peak memory usage
+        for chunk_start in range(0, len(examples), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(examples))
+            chunk_examples = examples[chunk_start:chunk_end]
 
-            if rollout_token_count < 2:
+            logger.info(
+                f"📦 Processing chunk {chunk_start//chunk_size + 1}/{(len(examples) + chunk_size - 1)//chunk_size} "
+                f"(examples {chunk_start+1}-{chunk_end}/{len(examples)})"
+            )
+
+            # PHASE 1: Batch roll_in calls for this chunk
+            prompts = [item["prompt"] for item in chunk_examples]
+            rollouts = model.roll_in_batch(
+                prompts, gen_cfg.max_new_tokens, batch_size=batch_size
+            )
+
+            # PHASE 2: Prepare contexts for continuation
+            contexts_to_continue = []
+            for item, rollout in zip(chunk_examples, rollouts):
+                built_prompt = rollout["prompt"]
+                prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
+                context_token_ids = rollout["context_ids"].tolist()
+                full_token_count = len(context_token_ids)
+                rollout_token_count = full_token_count - prompt_token_count
+
+                if rollout_token_count < 2:
+                    continue
+
+                for _ in range(samples_per_example):
+                    cutoff_tokens = random.randint(1, rollout_token_count - 1)
+                    context_prefix_ids = context_token_ids[
+                        : prompt_token_count + cutoff_tokens
+                    ]
+                    context_text = model.tokenizer.decode(
+                        context_prefix_ids, skip_special_tokens=True
+                    )
+                    solution_prefix_ids = context_prefix_ids[prompt_token_count:]
+                    solution_prefix_text = model.tokenizer.decode(
+                        solution_prefix_ids, skip_special_tokens=True
+                    )
+                    remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
+
+                    if remaining_token_budget >= 1:
+                        contexts_to_continue.append(
+                            {
+                                "ex": item["ex"],
+                                "prompt": item["prompt"],
+                                "context_text": context_text,
+                                "solution_prefix_text": solution_prefix_text,
+                                "cutoff_tokens": cutoff_tokens,
+                                "remaining_token_budget": remaining_token_budget,
+                            }
+                        )
+
+            if not contexts_to_continue:
                 logger.info(
-                    "Skipping example due to short rollout: dataset={} family={} prompt_tokens={} rollout_tokens={}",
-                    dataset,
-                    str(family),
-                    prompt_token_count,
-                    rollout_token_count,
+                    f"⏭️  Chunk {chunk_start//chunk_size + 1}: No valid contexts, skipping"
                 )
+                del rollouts
                 continue
 
-            for _ in range(samples_per_example):
-                cutoff_tokens = random.randint(1, rollout_token_count - 1)
+            # PHASE 3: Batch continue_from_context calls
+            all_contexts = [item["context_text"] for item in contexts_to_continue]
+            min_remaining_tokens = min(
+                item["remaining_token_budget"] for item in contexts_to_continue
+            )
 
-                context_prefix_ids = context_token_ids[
-                    : prompt_token_count + cutoff_tokens
-                ]
-                context_text = model.tokenizer.decode(
-                    context_prefix_ids, skip_special_tokens=True
-                )
-                solution_prefix_ids = context_prefix_ids[prompt_token_count:]
-                solution_prefix_text = model.tokenizer.decode(
-                    solution_prefix_ids, skip_special_tokens=True
-                )
+            greedy_continuations = model.continue_from_context_batch(
+                all_contexts, min_remaining_tokens, greedy=True, batch_size=batch_size
+            )
+            sampled_continuations = model.continue_from_context_batch(
+                all_contexts, min_remaining_tokens, greedy=False, batch_size=batch_size
+            )
 
-                remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
-                contexts_to_continue.append(
+            # PHASE 4: Assemble samples and score
+            for ctx, y_ref, y_sample in zip(
+                contexts_to_continue, greedy_continuations, sampled_continuations
+            ):
+                y_a = ctx["solution_prefix_text"] + y_ref
+                y_b = ctx["solution_prefix_text"] + y_sample
+
+                score_a, score_b, preferred = self.score_samples(ctx["ex"], y_a, y_b)
+
+                all_records.append(
                     {
-                        "ex": item["ex"],
-                        "prompt": item["prompt"],
-                        "context_text": context_text,
-                        "solution_prefix_text": solution_prefix_text,
-                        "cutoff_tokens": cutoff_tokens,
-                        "remaining_token_budget": remaining_token_budget,
+                        "question": ctx["ex"].question,
+                        "answer": ctx["ex"].answer,
+                        "prompt": ctx["prompt"],
+                        "t": ctx["cutoff_tokens"],
+                        "context": ctx["prompt"] + ctx["solution_prefix_text"],
+                        "y_a": y_a,
+                        "y_b": y_b,
+                        "score_a": score_a,
+                        "score_b": score_b,
+                        "preferred": preferred,
                     }
                 )
 
-        if not contexts_to_continue:
-            logger.info("⚠️ No valid contexts (all rollouts too short)")
-            return
+            # Clear chunk data to free memory
+            del rollouts, contexts_to_continue, all_contexts
+            del greedy_continuations, sampled_continuations
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        # Filter out contexts with non-positive remaining tokens
-        contexts_to_continue = [
-            ctx for ctx in contexts_to_continue if ctx["remaining_token_budget"] >= 1
-        ]
-
-        if not contexts_to_continue:
-            logger.info("⚠️ No valid contexts (all have insufficient remaining tokens)")
-            return
-
-        logger.info(
-            f"🔄 Prepared {len(contexts_to_continue)} contexts, now batching continuations..."
-        )
-
-        # PHASE 3: Batch all continue_from_context calls
-        all_contexts = [item["context_text"] for item in contexts_to_continue]
-        min_remaining_tokens = min(
-            item["remaining_token_budget"] for item in contexts_to_continue
-        )
-
-        greedy_continuations = model.continue_from_context_batch(
-            all_contexts, min_remaining_tokens, greedy=True, batch_size=batch_size
-        )
-        sampled_continuations = model.continue_from_context_batch(
-            all_contexts, min_remaining_tokens, greedy=False, batch_size=batch_size
-        )
-
-        # PHASE 4: Assemble generated samples and score
-        records: List[Dict[str, Any]] = []
-        for ctx, y_ref, y_sample in tqdm(
-            zip(contexts_to_continue, greedy_continuations, sampled_continuations),
-            total=len(contexts_to_continue),
-            desc="Scoring samples",
-        ):
-            y_a = ctx["solution_prefix_text"] + y_ref
-            y_b = ctx["solution_prefix_text"] + y_sample
-
-            score_a, score_b, preferred = self.score_samples(ctx["ex"], y_a, y_b)
-
-            records.append(
-                {
-                    "question": ctx["ex"].question,
-                    "answer": ctx["ex"].answer,
-                    "prompt": ctx["prompt"],
-                    "t": ctx["cutoff_tokens"],
-                    "context": ctx["prompt"] + ctx["solution_prefix_text"],
-                    "y_a": y_a,
-                    "y_b": y_b,
-                    "score_a": score_a,
-                    "score_b": score_b,
-                    "preferred": preferred,
-                }
+            logger.info(
+                f"✅ Chunk {chunk_start//chunk_size + 1} complete: {len(all_records)} total records so far"
             )
 
-        if not records:
+        if not all_records:
+            if reward_scorer is not None:
+                reward_scorer.cleanup()
             return
-        new_ds = Dataset.from_list(records)
+
+        logger.info(f"🎉 All chunks processed: {len(all_records)} total records")
+        new_ds = Dataset.from_list(all_records)
         merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
+
+        if reward_scorer is not None:
+            reward_scorer.cleanup()
+            if hasattr(self, "_reward"):
+                del self._reward
 
     def resolve_ref_for_round(
         self,

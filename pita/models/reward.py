@@ -51,6 +51,18 @@ class RewardScorer:
     def tokenizer(self):
         return self._tokenizer
 
+    def cleanup(self):
+        """Release GPU memory held by the pipeline and model."""
+        if hasattr(self, "_pipe") and self._pipe is not None:
+            if hasattr(self._pipe, "model"):
+                del self._pipe.model
+            del self._pipe
+            self._pipe = None
+        if hasattr(self, "_tokenizer"):
+            del self._tokenizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def score_pair(self, question: str, y_a: str, y_b: str) -> Tuple[float, float, int]:
         if "distilbert-imdb" in self._model_id:
             texts = [y_a, y_b]

@@ -58,11 +58,12 @@ class QSharpHFAlgorithm(ValueGuidedAlgorithms):
         cls_model: Optional[str] = None,
         run_root: Optional[Any] = None,
     ) -> None:
+        reward_scorer = None
         if dataset in {"TLDR", "IMDBGen"}:
             ds_cfg = cfg.datasets[dataset]
             rm_model = str(ds_cfg.reward_model)
             device = 0 if torch.cuda.is_available() else -1
-            self._reward = RewardScorer(
+            reward_scorer = RewardScorer(
                 rm_model,
                 bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
                 bt_beta=float(cfg.data_collection.bradley_terry_beta),
@@ -70,10 +71,17 @@ class QSharpHFAlgorithm(ValueGuidedAlgorithms):
                 dtype=str(cfg.system.dtype),
                 batch_size=int(cfg.data_collection.reward_batch_size),
             )
+            self._reward = reward_scorer
 
-        super().generate_data(
-            cfg, ref_model, dataset, family, round_idx, cls_model, run_root
-        )
+        try:
+            super().generate_data(
+                cfg, ref_model, dataset, family, round_idx, cls_model, run_root
+            )
+        finally:
+            if reward_scorer is not None:
+                reward_scorer.cleanup()
+                if hasattr(self, "_reward"):
+                    del self._reward
 
     def score_samples(
         self, ex, y_a: str, y_b: str

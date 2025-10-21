@@ -46,15 +46,20 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             dtype=str(cfg.system.dtype),
             batch_size=int(cfg.data_collection.reward_batch_size),
         )
-        return super().generate_data(
-            cfg=cfg,
-            ref_model=ref_model,
-            dataset=dataset,
-            family=family,
-            round_idx=round_idx,
-            cls_model=cls_model,
-            run_root=run_root,
-        )
+        try:
+            return super().generate_data(
+                cfg=cfg,
+                ref_model=ref_model,
+                dataset=dataset,
+                family=family,
+                round_idx=round_idx,
+                cls_model=cls_model,
+                run_root=run_root,
+            )
+        finally:
+            if hasattr(self, "_reward") and self._reward is not None:
+                self._reward.cleanup()
+                del self._reward
 
     def resolve_ref_for_round(
         self,

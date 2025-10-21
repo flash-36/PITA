@@ -39,8 +39,9 @@ training:
 data_collection:
   samples_per_example: 4
   seed: 42
-  max_examples: 0
-  reward_batch_size: 32  # Increased from 2 to 32 for better GPU utilization
+  max_examples: 4
+  reward_batch_size: 8  # Increased from 2 to 32 for better GPU utilization
+  chunk_size: 128  # Process examples in chunks to reduce peak (python) memory usage during generation
   bradley_terry_sampling: true
   bradley_terry_beta: 1.0
 
@@ -51,7 +52,7 @@ evaluation:
   # Number of samples for majority voting evaluation
   num_samples: 8
   # Batch size for evaluation generation
-  batch_size: 64
+  batch_size: 8
   # For each training dataset, which datasets to evaluate on
   datasets_by_train:
     GSM8K:
