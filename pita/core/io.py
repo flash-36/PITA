@@ -80,10 +80,15 @@ def check_training_completed(
     run_root: Path,
 ) -> bool:
     """Check if training is complete for a job."""
-    family_cap = str(family).capitalize()
     r = int(round_idx) + 1
     result_path = (
-        run_root / "results" / algo_key / family_cap / dataset / f"r{r}" / "result.json"
+        run_root
+        / "results"
+        / algo_key
+        / str(family)
+        / dataset
+        / f"r{r}"
+        / "result.json"
     )
     return result_path.exists()
 
