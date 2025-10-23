@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import List, Dict, Any, Callable, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,17 @@ from loguru import logger
 import traceback
 
 from pita.core.gpu_manager import get_gpu_manager
+
+
+def _is_device_assert(e: BaseException) -> bool:
+    """Check if exception is a CUDA device-side assert."""
+    msg = str(e).lower()
+    return (
+        "device-side assert triggered" in msg
+        or "device side assert triggered" in msg
+        or "cuda error: device-side assert triggered" in msg
+        or "_assert_async_cuda_kernel" in msg
+    )
 
 
 @dataclass
@@ -229,6 +241,21 @@ class ParallelJobExecutor:
                 except Exception as e:
                     logger.error(f"Worker {worker_id} error: {e}")
                     traceback.print_exc()
+
+                    if _is_device_assert(e):
+                        logger.error(
+                            f"🔥 Worker {worker_id} encountered CUDA device-side assert; terminating worker to reset CUDA context."
+                        )
+                        if "job" in locals():
+                            result_queue.put(
+                                JobResult(
+                                    job=job,
+                                    success=False,
+                                    error=f"CUDA device-side assert: {str(e)}",
+                                )
+                            )
+                        os._exit(1)
+
                     if "job" in locals():
                         result_queue.put(
                             JobResult(
@@ -237,6 +264,11 @@ class ParallelJobExecutor:
                                 error=str(e),
                             )
                         )
+
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
 
             logger.info(f"Worker {worker_id} finished")
 
