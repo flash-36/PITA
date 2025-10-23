@@ -72,7 +72,7 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
         current_state = state_manager.get_state(job.job_id)
 
         # Skip if already completed
-        if current_state == JobState.TRAINING_COMPLETED:
+        if current_state == JobState.EVAL_COMPLETED:
             logger.info(f"⏭️  Skipping completed job: {job}")
             # Load existing result
             out_dir = create_subdir(
@@ -121,7 +121,11 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
         )
 
         # Generate data (skip if already done)
-        if current_state == JobState.DATA_GENERATED:
+        if current_state in (
+            JobState.DATA_GENERATED,
+            JobState.MODEL_TRAINED,
+            JobState.EVAL_COMPLETED,
+        ):
             logger.info(f"⏭️  Skipping data generation (already done): {job}")
         else:
             logger.info(f"🧪 Generating data: {job}")
@@ -136,49 +140,57 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
             )
             state_manager.update_state(job.job_id, JobState.DATA_GENERATED)
 
-        # Train
-        logger.info(f"🏋️ Training: {job}")
-        out_dir = create_subdir(
-            run_root,
-            [
-                "results",
-                job.algo_key,
-                f"{job.family_name}",
-                job.dataset_name,
-                f"r{job.round_idx + 1}",
-            ],
-        )
-
-        # Temporarily set a minimal Hydra-like context or pass run_root explicitly
-        # Check if algorithm's run() accepts run_root parameter
-        import inspect
-
-        sig = inspect.signature(algo.run)
-        if "run_root" in sig.parameters:
-            result = algo.run(
-                cfg=cfg,
-                ref_model=ref_for_train,
-                cls_model=job.value_model_alias,
-                dataset=job.dataset_name,
-                family=job.family_name,
-                output_dir=out_dir,
-                round_idx=job.round_idx,
-                run_root=run_root,
-            )
+        # Train and evaluate
+        if current_state == JobState.EVAL_COMPLETED:
+            logger.info(f"⏭️  Job already completed: {job}")
+            result = None
         else:
-            result = algo.run(
-                cfg=cfg,
-                ref_model=ref_for_train,
-                cls_model=job.value_model_alias,
-                dataset=job.dataset_name,
-                family=job.family_name,
-                output_dir=out_dir,
-                round_idx=job.round_idx,
+            out_dir = create_subdir(
+                run_root,
+                [
+                    "results",
+                    job.algo_key,
+                    f"{job.family_name}",
+                    job.dataset_name,
+                    f"r{job.round_idx + 1}",
+                ],
             )
 
-        save_json(out_dir / "result.json", result or {})
+            if current_state in (JobState.MODEL_TRAINED, JobState.EVAL_COMPLETED):
+                logger.info(f"⏭️  Skipping training (model already trained): {job}")
+            else:
+                logger.info(f"🏋️ Training: {job}")
 
-        state_manager.update_state(job.job_id, JobState.TRAINING_COMPLETED)
+            import inspect
+
+            sig = inspect.signature(algo.run)
+            if "run_root" in sig.parameters:
+                result = algo.run(
+                    cfg=cfg,
+                    ref_model=ref_for_train,
+                    cls_model=job.value_model_alias,
+                    dataset=job.dataset_name,
+                    family=job.family_name,
+                    output_dir=out_dir,
+                    round_idx=job.round_idx,
+                    run_root=run_root,
+                )
+            else:
+                result = algo.run(
+                    cfg=cfg,
+                    ref_model=ref_for_train,
+                    cls_model=job.value_model_alias,
+                    dataset=job.dataset_name,
+                    family=job.family_name,
+                    output_dir=out_dir,
+                    round_idx=job.round_idx,
+                )
+
+            state_manager.update_state(job.job_id, JobState.MODEL_TRAINED)
+
+            save_json(out_dir / "result.json", result or {})
+            state_manager.update_state(job.job_id, JobState.EVAL_COMPLETED)
+
         logger.info(f"✅ Completed job: {job}")
 
         # Explicit cleanup to free memory before returning

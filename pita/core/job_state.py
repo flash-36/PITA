@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import Dict
 from loguru import logger
 
-from pita.core.io import check_data_generated, check_training_completed
+from pita.core.io import check_data_generated, check_model_trained, check_eval_completed
 
 
 class JobState(str, Enum):
     NOT_STARTED = "NOT_STARTED"
     DATA_GENERATED = "DATA_GENERATED"
-    TRAINING_COMPLETED = "TRAINING_COMPLETED"
+    MODEL_TRAINED = "MODEL_TRAINED"
+    EVAL_COMPLETED = "EVAL_COMPLETED"
     FAILED = "FAILED"
 
 
@@ -58,10 +59,10 @@ class JobStateManager:
         self, algo_key: str, dataset: str, family: str, round_idx: int
     ) -> JobState:
         """Determine actual state by checking file system."""
-        if check_training_completed(
-            algo_key, dataset, family, round_idx, self.run_root
-        ):
-            return JobState.TRAINING_COMPLETED
+        if check_eval_completed(algo_key, dataset, family, round_idx, self.run_root):
+            return JobState.EVAL_COMPLETED
+        elif check_model_trained(algo_key, dataset, family, round_idx, self.run_root):
+            return JobState.MODEL_TRAINED
         elif check_data_generated(algo_key, dataset, family, round_idx, self.run_root):
             return JobState.DATA_GENERATED
         else:
@@ -84,8 +85,11 @@ class JobStateManager:
 
         self._save()
 
-        completed = sum(
-            1 for s in self.states.values() if s == JobState.TRAINING_COMPLETED.value
+        eval_completed = sum(
+            1 for s in self.states.values() if s == JobState.EVAL_COMPLETED.value
+        )
+        model_trained = sum(
+            1 for s in self.states.values() if s == JobState.MODEL_TRAINED.value
         )
         data_only = sum(
             1 for s in self.states.values() if s == JobState.DATA_GENERATED.value
@@ -96,6 +100,6 @@ class JobStateManager:
         failed = sum(1 for s in self.states.values() if s == JobState.FAILED.value)
 
         logger.info(
-            f"Job state summary: {completed} completed, {data_only} data-only, "
-            f"{not_started} not started, {failed} failed"
+            f"Job state summary: {eval_completed} eval completed, {model_trained} model trained, "
+            f"{data_only} data-only, {not_started} not started, {failed} failed"
         )

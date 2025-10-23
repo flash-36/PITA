@@ -72,14 +72,28 @@ def check_data_generated(
     return cur_hf.exists()
 
 
-def check_training_completed(
+def check_model_trained(
     algo_key: str,
     dataset: str,
     family: str,
     round_idx: int,
     run_root: Path,
 ) -> bool:
-    """Check if training is complete for a job."""
+    """Check if model training is complete for a job."""
+    family_cap = str(family).capitalize()
+    r = int(round_idx) + 1
+    model_path = run_root / "models" / algo_key / f"{dataset}_{family_cap}_r{r}"
+    return model_path.exists() and any(model_path.iterdir())
+
+
+def check_eval_completed(
+    algo_key: str,
+    dataset: str,
+    family: str,
+    round_idx: int,
+    run_root: Path,
+) -> bool:
+    """Check if evaluation is complete for a job."""
     r = int(round_idx) + 1
     result_path = (
         run_root
