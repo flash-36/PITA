@@ -8,9 +8,22 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.generation.logits_process import LogitsProcessorList
 from tqdm import tqdm
+from loguru import logger
 
 from pita.models.catalog import resolve_model_id
 from pita.core.prompts import build_instruction_prompt
+
+
+def _is_device_assert(e: BaseException) -> bool:
+    """Check if exception is a CUDA device-side assert."""
+    msg = str(e).lower()
+    return (
+        "device-side assert triggered" in msg
+        or "device side assert triggered" in msg
+        or "cuda error: device-side assert triggered" in msg
+        or "_assert_async_cuda_kernel" in msg
+        or "probability tensor contains either" in msg
+    )
 
 
 @dataclass
@@ -102,6 +115,9 @@ class HFModel:
         logits_processor: Optional[LogitsProcessorList],
         max_new_tokens: Optional[int] = None,
     ):
+        temperature = 1.0 if greedy else max(0.5, min(2.0, self.gen_cfg.temperature))
+        top_p = 1.0 if greedy else max(0.9, min(0.99, self.gen_cfg.top_p))
+
         return {
             "max_new_tokens": (
                 self.gen_cfg.max_new_tokens
@@ -109,12 +125,39 @@ class HFModel:
                 else int(max_new_tokens)
             ),
             "do_sample": (not greedy),
-            "temperature": (1.0 if greedy else self.gen_cfg.temperature),
-            "top_p": (1.0 if greedy else self.gen_cfg.top_p),
+            "temperature": temperature,
+            "top_p": top_p,
             "pad_token_id": self.pad_token_id,
             "eos_token_id": self.eos_token_ids,
             "logits_processor": logits_processor,
         }
+
+    def _generate_with_fallback(
+        self, inputs: Dict[str, torch.Tensor], gen_kwargs: Dict[str, Any]
+    ) -> torch.Tensor:
+        """Generate with fp32 greedy fallback on device-assert."""
+        try:
+            return self.model.generate(**inputs, **gen_kwargs)
+        except RuntimeError as e:
+            if _is_device_assert(e):
+                logger.warning(
+                    f"🔥 Device-assert during generation, falling back to greedy fp32: {e}"
+                )
+                original_dtype = self.model.dtype
+                self.model.to(torch.float32)
+                fallback_kwargs = {
+                    **gen_kwargs,
+                    "do_sample": False,
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                }
+                fallback_kwargs.pop("logits_processor", None)
+                try:
+                    result = self.model.generate(**inputs, **fallback_kwargs)
+                    return result
+                finally:
+                    self.model.to(original_dtype)
+            raise
 
     @torch.inference_mode()
     def generate_text(
@@ -125,10 +168,8 @@ class HFModel:
         logits_processor: Optional[LogitsProcessorList] = None,
     ) -> str:
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-        output = self.model.generate(
-            **inputs,
-            **self._gen_kwargs(greedy=greedy, logits_processor=logits_processor),
-        )
+        gen_kwargs = self._gen_kwargs(greedy=greedy, logits_processor=logits_processor)
+        output = self._generate_with_fallback(inputs, gen_kwargs)
         new_tokens = output[0][inputs["input_ids"].shape[1] :]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
@@ -159,15 +200,13 @@ class HFModel:
         remaining = n
         while remaining > 0:
             current_batch = min(batch_size, remaining)
-            out = self.model.generate(
-                **inputs,
-                **self._gen_kwargs(
-                    greedy=greedy,
-                    logits_processor=logits_processor,
-                    max_new_tokens=max_new_tokens,
-                ),
-                num_return_sequences=current_batch,
+            gen_kwargs = self._gen_kwargs(
+                greedy=greedy,
+                logits_processor=logits_processor,
+                max_new_tokens=max_new_tokens,
             )
+            gen_kwargs["num_return_sequences"] = current_batch
+            out = self._generate_with_fallback(inputs, gen_kwargs)
 
             # Decode this batch
             batch_texts = [
@@ -203,14 +242,12 @@ class HFModel:
             use_chat_template=self.gen_cfg.use_chat_template,
         )
         ids = self.tokenizer(built, return_tensors="pt").to(self.model.device)
-        out = self.model.generate(
-            **ids,
-            **self._gen_kwargs(
-                greedy=True,
-                logits_processor=logits_processor,
-                max_new_tokens=max_roll_tokens,
-            ),
+        gen_kwargs = self._gen_kwargs(
+            greedy=True,
+            logits_processor=logits_processor,
+            max_new_tokens=max_roll_tokens,
         )
+        out = self._generate_with_fallback(ids, gen_kwargs)
         context_tokens = out[0]
         context_text = self.tokenizer.decode(context_tokens, skip_special_tokens=True)
         return {
@@ -228,15 +265,12 @@ class HFModel:
         logits_processor: Optional[LogitsProcessorList] = None,
     ) -> str:
         ids = self.tokenizer(context_text, return_tensors="pt").to(self.model.device)
-
-        out = self.model.generate(
-            **ids,
-            **self._gen_kwargs(
-                greedy=greedy,
-                logits_processor=logits_processor,
-                max_new_tokens=max_new_tokens,
-            ),
+        gen_kwargs = self._gen_kwargs(
+            greedy=greedy,
+            logits_processor=logits_processor,
+            max_new_tokens=max_new_tokens,
         )
+        out = self._generate_with_fallback(ids, gen_kwargs)
         new_tokens = out[0][ids["input_ids"].shape[1] :]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
@@ -275,14 +309,12 @@ class HFModel:
             )
             prompt_lengths = (ids["attention_mask"].sum(dim=1)).tolist()
 
-            out = self.model.generate(
-                **ids,
-                **self._gen_kwargs(
-                    greedy=True,
-                    logits_processor=logits_processor,
-                    max_new_tokens=max_roll_tokens,
-                ),
+            gen_kwargs = self._gen_kwargs(
+                greedy=True,
+                logits_processor=logits_processor,
+                max_new_tokens=max_roll_tokens,
             )
+            out = self._generate_with_fallback(ids, gen_kwargs)
 
             for j, (seq, prompt_len) in enumerate(zip(out, prompt_lengths)):
                 context_text = self.tokenizer.decode(seq, skip_special_tokens=True)
@@ -330,14 +362,12 @@ class HFModel:
 
             prompt_lengths = (ids["attention_mask"].sum(dim=1)).tolist()
 
-            out = self.model.generate(
-                **ids,
-                **self._gen_kwargs(
-                    greedy=greedy,
-                    logits_processor=logits_processor,
-                    max_new_tokens=max_new_tokens,
-                ),
+            gen_kwargs = self._gen_kwargs(
+                greedy=greedy,
+                logits_processor=logits_processor,
+                max_new_tokens=max_new_tokens,
             )
+            out = self._generate_with_fallback(ids, gen_kwargs)
 
             for seq, prompt_len in zip(out, prompt_lengths):
                 new_tokens = seq[prompt_len:]

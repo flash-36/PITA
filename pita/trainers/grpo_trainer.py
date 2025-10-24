@@ -196,7 +196,7 @@ class GRPOTrainer:
             mask = group_ids == gid
             group_rewards = rewards[mask]
             mean_r = group_rewards.mean()
-            std_r = group_rewards.std() + 1e-8
+            std_r = group_rewards.std(unbiased=False).clamp_min(1e-8)
             advantages[mask] = (group_rewards - mean_r) / std_r
 
         kl_penalty = float(self.cfg.kl_coef) * (pol_logps - ref_logps)
