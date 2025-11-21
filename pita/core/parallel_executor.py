@@ -9,11 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 import torch
 import torch.multiprocessing as mp
-from queue import Queue, Empty
+from queue import Empty
 from loguru import logger
 import traceback
 
 from pita.core.gpu_manager import get_gpu_manager
+from pita.core.job_state import JobStateManager, JobState
 
 
 def _is_device_assert(e: BaseException) -> bool:
@@ -298,6 +299,139 @@ class ParallelJobExecutor:
         else:
             return self.execute_jobs_parallel(jobs, job_executor, executor_args)
 
+    def execute_jobs_with_priority(
+        self,
+        jobs: List[TrainingJob],
+        job_executor: Callable[[TrainingJob, int, Any], JobResult],
+        executor_args: Any = None,
+        state_manager: Optional[JobStateManager] = None,
+    ) -> List[JobResult]:
+        """Execute jobs in parallel with priority-based scheduling.
+        
+        Jobs closer to completion get higher priority so eval results come faster.
+        
+        Priority order (highest to lowest):
+        1. MODEL_TRAINED (just needs eval)
+        2. DATA_GENERATED (needs training + eval)
+        3. NOT_STARTED (needs data gen + training + eval)
+        
+        Args:
+            jobs: List of jobs to execute
+            job_executor: Function that executes a single job
+            executor_args: Arguments to pass to job executor
+            state_manager: Job state manager for priority calculation
+            
+        Returns:
+            List of job results
+        """
+        if self.gpu_manager.num_gpus <= 1:
+            return self.execute_jobs_sequential(jobs, job_executor, executor_args)
+
+        logger.info(
+            f"🚀 Starting priority-based parallel execution across {self.gpu_manager.num_gpus} GPUs"
+        )
+
+        # Use spawn for CUDA compatibility
+        mp_context = mp.get_context("spawn")
+
+        # Create priority job queue and result queue
+        job_queue = mp_context.Manager().Queue()
+        result_queue = mp_context.Queue()
+
+        # Calculate priorities and add jobs to queue
+        def get_job_priority(job: TrainingJob) -> int:
+            """Calculate priority for a job (higher = more urgent)."""
+            if state_manager is None:
+                base_priority = 0
+            else:
+                state = state_manager.get_state(job.job_id)
+                if state == JobState.EVAL_COMPLETED:
+                    return 1000  # Already done, will be skipped
+                elif state == JobState.MODEL_TRAINED:
+                    base_priority = 900  # Just needs eval
+                elif state == JobState.DATA_GENERATED:
+                    base_priority = 500  # Needs training + eval
+                else:
+                    base_priority = 100  # Needs everything
+            
+            # Within same state, prioritize earlier rounds
+            round_priority = -job.round_idx * 10
+            
+            return base_priority + round_priority
+
+        # Sort jobs by priority (highest first)
+        prioritized_jobs = sorted(jobs, key=get_job_priority, reverse=True)
+        
+        logger.info("📊 Job priority breakdown:")
+        priority_counts = {}
+        for job in prioritized_jobs:
+            priority = get_job_priority(job)
+            stage = "COMPLETED" if priority >= 1000 else \
+                    "MODEL_TRAINED" if priority >= 900 else \
+                    "DATA_GENERATED" if priority >= 500 else "NOT_STARTED"
+            priority_counts[stage] = priority_counts.get(stage, 0) + 1
+        for stage, count in sorted(priority_counts.items()):
+            logger.info(f"  {stage}: {count} jobs")
+
+        # Fill job queue with prioritized jobs
+        for job in prioritized_jobs:
+            job_queue.put(job)
+
+        # Add sentinel values to signal workers to stop
+        for _ in range(self.max_concurrent):
+            job_queue.put(None)
+
+        # Start worker processes
+        workers = []
+        for worker_id in range(self.max_concurrent):
+            gpu_id = self.gpu_manager.available_gpus[
+                worker_id % self.gpu_manager.num_gpus
+            ]
+
+            p = mp_context.Process(
+                target=self._worker_loop,
+                args=(
+                    worker_id,
+                    gpu_id,
+                    job_queue,
+                    result_queue,
+                    job_executor,
+                    executor_args,
+                ),
+            )
+            p.start()
+            workers.append(p)
+
+        # Collect results
+        results = []
+        completed = 0
+        total = len(jobs)
+
+        from tqdm import tqdm
+
+        with tqdm(total=total, desc="⚙️  Jobs", unit="job") as pbar:
+            while completed < total:
+                try:
+                    result = result_queue.get(timeout=1)
+                    results.append(result)
+                    completed += 1
+                    pbar.update(1)
+
+                    if result.success:
+                        logger.info(f"✅ Completed: {result.job}")
+                    else:
+                        logger.error(f"❌ Failed: {result.job} - {result.error}")
+
+                except Empty:
+                    continue
+
+        # Wait for all workers to finish
+        for p in workers:
+            p.join()
+
+        logger.info(f"🎉 All jobs complete!")
+        return results
+
 
 def create_job_list(cfg) -> List[TrainingJob]:
     """Create a list of training jobs from configuration.
@@ -324,7 +458,7 @@ def create_job_list(cfg) -> List[TrainingJob]:
         for family_name, ref_model_alias, value_model_alias in model_pairs:
             for dataset_name in datasets:
                 for round_idx in range(rounds):
-                    job_id = f"{algo_key}_{family_name}_{dataset_name}_r{round_idx}"
+                    job_id = f"{algo_key}_{family_name}_{dataset_name}_r{round_idx+1}"
                     job = TrainingJob(
                         job_id=job_id,
                         algo_key=algo_key,

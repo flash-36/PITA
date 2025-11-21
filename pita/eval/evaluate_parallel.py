@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from collections import Counter
 from pathlib import Path
+import time
 
 from omegaconf import DictConfig
 from datasets import Dataset
@@ -126,9 +127,18 @@ def _compute_traj_kl_batched(
 
     from tqdm import tqdm
 
-    for i in tqdm(
-        range(0, len(prompt_texts), batch_size), desc="Computing KL", leave=False
-    ):
+    # Check if guided model to decide on progress bar strategy
+    from pita.models.guided import GuidedHFModel
+    is_guided_model = isinstance(policy, GuidedHFModel)
+    
+    outer_pbar = tqdm(
+        range(0, len(prompt_texts), batch_size), 
+        desc="Computing KL", 
+        leave=False,
+        disable=is_guided_model  # Disable outer bar for guided models (we'll use inner token bar)
+    )
+    
+    for i in outer_pbar:
         batch_prompts = prompt_texts[i : i + batch_size]
         batch_conts = continuation_texts[i : i + batch_size]
 
@@ -170,6 +180,23 @@ def _compute_traj_kl_batched(
         )
 
         if is_guided:
+            # Calculate total steps for progress tracking
+            total_steps = sum(
+                ref_out.logits[idx, prompt_len - 1 : -1, :].shape[0]
+                for idx, prompt_len in enumerate(batch_prompt_lens)
+                if ref_out.logits[idx, prompt_len - 1 : -1, :].numel() > 0
+            )
+            
+            # Single progress bar for all examples in this batch
+            use_pbar = total_steps > 200
+            pbar = tqdm(
+                total=total_steps, 
+                desc=f"  KL tokens (batch {(i//batch_size)+1})", 
+                leave=False, 
+                unit="tok",
+                position=0  # Force to top position
+            ) if use_pbar else None
+            
             for idx, prompt_len in enumerate(batch_prompt_lens):
                 ref_logits_steps = ref_out.logits[idx : idx + 1, prompt_len - 1 : -1, :]
                 if ref_logits_steps.numel() == 0:
@@ -181,7 +208,10 @@ def _compute_traj_kl_batched(
                 kl_sum = 0.0
                 steps = ref_logits_steps.shape[1]
                 concat_input_ids = batched_input_ids[idx : idx + 1]
+                
                 for t in range(steps):
+                    if pbar:
+                        pbar.update(1)
                     prefix_len = prompt_len + t
                     prefix_ids = concat_input_ids[:, :prefix_len]
                     base_scores = ref_logits_steps[:, t, :]
@@ -189,6 +219,9 @@ def _compute_traj_kl_batched(
                     kl_t = _kl_divergence(guided_scores, base_scores).mean()
                     kl_sum += float(kl_t.item())
                 kl_results.append(kl_sum)
+            
+            if pbar:
+                pbar.close()
         else:
             pol_out = policy_model.model(
                 input_ids=batched_input_ids,
@@ -241,13 +274,13 @@ def evaluate_pass1_maj8_batched(
 
     examples = list(islice(ds.iter(), limit))
     logger.info(
-        f"🔄 Evaluating {len(examples)} examples with batch_size={batch_size}, {num_samples} samples each"
+        f"📊 Evaluating {len(examples)} examples with batch_size={batch_size}, {num_samples} samples each"
     )
 
     from tqdm import tqdm
 
     prompts_data = []
-    for ex in examples:
+    for ex in tqdm(examples, desc="🔧 Preparing prompts", unit="ex"):
         prompt = ds.hydrate_prompt(ex.question)
         built = build_instruction_prompt(
             prompt,
@@ -263,7 +296,7 @@ def evaluate_pass1_maj8_batched(
             all_prompts.append(item["built"])
             prompt_to_example.append(idx)
 
-    logger.info(f"🔄 Batching {len(all_prompts)} generations...")
+    logger.info(f"🔄 Generating {len(all_prompts)} predictions...")
     all_preds = model.continue_from_context_batch(
         all_prompts, model.gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
     )
@@ -272,7 +305,12 @@ def evaluate_pass1_maj8_batched(
     for ex_idx, pred in zip(prompt_to_example, all_preds):
         grouped_preds[ex_idx].append(pred)
 
-    logger.info("✅ Computing metrics and KL...")
+    logger.info("\n📊 Computing metrics and KL divergence...")
+    from pita.models.guided import GuidedHFModel
+    import time
+    if isinstance(model, GuidedHFModel):
+        logger.info("⚠️  KL computation for guided models processes tokens step-by-step - this may take several minutes")
+    kl_start = time.time()
     total = 0
     pass1 = 0
     maj8 = 0
@@ -315,6 +353,8 @@ def evaluate_pass1_maj8_batched(
         batch_size=batch_size,
     )
     sum_kl = sum(kl_values)
+    kl_elapsed = time.time() - kl_start
+    logger.info(f"✅ KL computation complete ({kl_elapsed:.1f}s)")
 
     if save_dir is not None:
         ensure_dir(Path(save_dir))
@@ -369,13 +409,13 @@ def evaluate_avg_reward_batched(
 
     # Collect all examples first
     examples = list(islice(ds.iter(), limit))
-    logger.info(f"🔄 Evaluating {len(examples)} examples with batch_size={batch_size}")
+    logger.info(f"📊 Evaluating {len(examples)} examples with batch_size={batch_size}")
 
     # PHASE 1: Build all prompts
     from tqdm import tqdm
 
     prompts_data = []
-    for ex in examples:
+    for ex in tqdm(examples, desc="🔧 Preparing prompts", unit="ex"):
         prompt = ds.hydrate_prompt(ex.question)
         built = build_instruction_prompt(
             prompt,
@@ -385,21 +425,21 @@ def evaluate_avg_reward_batched(
         prompts_data.append({"ex": ex, "built": built})
 
     # PHASE 2: Batch generate all predictions
-    logger.info("🔄 Batching generation...")
+    logger.info("🔄 Generating predictions...")
     all_prompts = [item["built"] for item in prompts_data]
     preds = model.continue_from_context_batch(
         all_prompts, model.gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
     )
 
     # PHASE 3: Batch score all predictions
-    logger.info("✅ Batching reward scoring...")
+    logger.info("📊 Computing reward scores...")
     score_pairs = [
         (item["ex"].question, pred) for item, pred in zip(prompts_data, preds)
     ]
     rewards = scorer.score_batch_single(score_pairs)
 
     # PHASE 4: Compute KL in batches
-    logger.info("✅ Computing KL divergence...")
+    logger.info("📊 Computing KL divergence...")
     all_prompts = [item["built"] for item in prompts_data]
     kl_values = _compute_traj_kl_batched(
         model,

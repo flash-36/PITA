@@ -31,18 +31,53 @@ class JobStateManager:
     def _load(self) -> None:
         """Load existing state from file or initialize from file system."""
         if self.state_file.exists():
-            with open(self.state_file, "r") as f:
-                data = json.load(f)
-                self.states = data.get("jobs", {})
-            logger.info(f"Loaded {len(self.states)} job states from {self.state_file}")
+            try:
+                with open(self.state_file, "r") as f:
+                    data = json.load(f)
+                    loaded_states = data.get("jobs", {})
+                
+                # Check if job IDs look like old format (will be corrected by filesystem scan)
+                if loaded_states and any("_r0" in job_id for job_id in loaded_states.keys()):
+                    logger.info(f"⚠️  Detected old job ID format, will reconstruct from filesystem")
+                    self.states = {}  # Force reconstruction
+                else:
+                    self.states = loaded_states
+                    logger.info(f"💾 Loaded {len(self.states)} job states from {self.state_file}")
+                
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(f"⚠️  Corrupted state file detected: {e}")
+                logger.warning(f"⚠️  Backing up corrupted file and rescanning filesystem")
+                
+                # Backup corrupted file
+                import shutil
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = self.state_file.with_suffix(f".json.corrupted_{timestamp}")
+                shutil.copy2(self.state_file, backup_path)
+                logger.info(f"💾 Backed up corrupted state to: {backup_path}")
+                
+                # Start fresh - will be reconstructed by initialize_from_jobs
+                self.states = {}
         else:
-            logger.info("No existing state file found, will create new state tracking")
+            logger.info("ℹ️  No existing state file found, will create new state tracking")
 
     def _save(self) -> None:
-        """Save current state to file."""
+        """Save current state to file atomically."""
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.state_file, "w") as f:
-            json.dump({"jobs": self.states}, f, indent=2)
+        
+        # Write to temporary file first, then atomic rename
+        temp_file = self.state_file.with_suffix(".json.tmp")
+        try:
+            with open(temp_file, "w") as f:
+                json.dump({"jobs": self.states}, f, indent=2)
+            
+            # Atomic rename (overwrites existing file on Unix)
+            temp_file.replace(self.state_file)
+        except Exception as e:
+            # Clean up temp file if something went wrong
+            if temp_file.exists():
+                temp_file.unlink()
+            raise e
 
     def get_state(self, job_id: str) -> JobState:
         """Get current state of a job."""
@@ -52,8 +87,12 @@ class JobStateManager:
     def update_state(self, job_id: str, state: JobState) -> None:
         """Update state of a job and persist to disk."""
         self.states[job_id] = state.value
-        self._save()
-        logger.debug(f"Updated job {job_id} to state {state.value}")
+        try:
+            self._save()
+            logger.debug(f"Updated job {job_id} to state {state.value}")
+        except Exception as e:
+            logger.error(f"⚠️  Failed to save job state for {job_id}: {e}")
+            logger.warning(f"⚠️  Continuing execution, but state may not be persisted")
 
     def scan_file_system(
         self, algo_key: str, dataset: str, family: str, round_idx: int
@@ -70,13 +109,25 @@ class JobStateManager:
 
     def initialize_from_jobs(self, jobs: list) -> None:
         """Scan file system for all jobs and initialize states."""
-        logger.info("Scanning file system to determine job states...")
+        had_states = len(self.states) > 0
+        
+        if had_states:
+            logger.info(f"🔍 Verifying {len(self.states)} existing job states against filesystem...")
+        else:
+            logger.info("🔍 Scanning file system to determine job states...")
+        
+        updates = 0
         for job in jobs:
             actual_state = self.scan_file_system(
                 job.algo_key, job.dataset_name, job.family_name, job.round_idx
             )
             current_state = self.get_state(job.job_id)
 
+            if current_state != actual_state:
+                updates += 1
+                if had_states:
+                    logger.debug(f"  Updated {job.job_id}: {current_state.value} → {actual_state.value}")
+            
             if (
                 current_state == JobState.NOT_STARTED
                 or actual_state != JobState.NOT_STARTED
@@ -84,6 +135,9 @@ class JobStateManager:
                 self.states[job.job_id] = actual_state.value
 
         self._save()
+        
+        if had_states and updates > 0:
+            logger.info(f"✅ Updated {updates} job states based on filesystem")
 
         eval_completed = sum(
             1 for s in self.states.values() if s == JobState.EVAL_COMPLETED.value
@@ -100,6 +154,6 @@ class JobStateManager:
         failed = sum(1 for s in self.states.values() if s == JobState.FAILED.value)
 
         logger.info(
-            f"Job state summary: {eval_completed} eval completed, {model_trained} model trained, "
+            f"📊 Job state summary: {eval_completed} completed, {model_trained} trained, "
             f"{data_only} data-only, {not_started} not started, {failed} failed"
         )

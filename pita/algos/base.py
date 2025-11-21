@@ -147,9 +147,28 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         run_root: Optional[Path] = None,
     ) -> None:
         """Generate data using parallel multi-GPU processing when available."""
+        from pita.core.io import (
+            get_checkpoint_dir,
+            load_all_checkpoints,
+            clear_checkpoints,
+        )
+
+        if run_root is None:
+            run_root = get_run_root()
+
         snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
             self.algo_key, dataset, family, round_idx, run_root=run_root
         )
+
+        checkpoint_dir = get_checkpoint_dir(
+            self.algo_key, dataset, family, round_idx, run_root
+        )
+
+        existing_records = load_all_checkpoints(checkpoint_dir)
+        if existing_records:
+            logger.info(
+                f"💾 Found {len(existing_records)} records from previous checkpoints"
+            )
 
         gpu_manager = get_gpu_manager()
         parallel_enabled = (
@@ -163,22 +182,28 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         with tracker.track_phase(f"data_generation_{dataset}"):
             if use_parallel:
                 logger.info(
-                    f"Using parallel generation with {gpu_manager.num_gpus} GPUs"
+                    f"🔧 Using parallel generation with {gpu_manager.num_gpus} GPUs"
                 )
                 records = self._generate_data_parallel(
                     cfg, ref_model, dataset, family, round_idx, cls_model, run_root
                 )
             else:
-                logger.info("Using sequential generation")
+                logger.info("🔧 Using sequential generation")
                 records = self._generate_data_sequential(
                     cfg, ref_model, dataset, family, round_idx, cls_model, run_root
                 )
 
-        if not records:
+        all_records = existing_records + records
+
+        if not all_records:
             return
 
-        new_ds = Dataset.from_list(records)
+        logger.info(f"💾 Saving {len(all_records)} total records")
+        new_ds = Dataset.from_list(all_records)
         merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
+
+        clear_checkpoints(checkpoint_dir)
+        logger.info(f"🧹 Cleared checkpoints")
 
     def _generate_data_parallel(
         self,
@@ -492,6 +517,17 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                 )
 
             logger.info(f"✅ Worker {worker_id} generated {len(records)} records")
+
+            from pita.core.io import get_checkpoint_dir, save_checkpoint
+
+            if run_root is None:
+                run_root = get_run_root()
+            checkpoint_dir = get_checkpoint_dir(
+                self.algo_key, dataset, family, round_idx, run_root
+            )
+            save_checkpoint(checkpoint_dir, worker_id, records)
+            logger.info(f"💾 Worker {worker_id} saved checkpoint")
+
             result_queue.put(records)
 
         except Exception as e:
@@ -843,9 +879,28 @@ class PostTrainingAlgorithms(AlgorithmBase):
         run_root: Optional[Path] = None,
     ) -> None:
         """Generate data using parallel multi-GPU processing when available."""
+        from pita.core.io import (
+            get_checkpoint_dir,
+            load_all_checkpoints,
+            clear_checkpoints,
+        )
+
+        if run_root is None:
+            run_root = get_run_root()
+
         snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
             self.algo_key, dataset, family, round_idx, run_root=run_root
         )
+
+        checkpoint_dir = get_checkpoint_dir(
+            self.algo_key, dataset, family, round_idx, run_root
+        )
+
+        existing_records = load_all_checkpoints(checkpoint_dir)
+        if existing_records:
+            logger.info(
+                f"💾 Found {len(existing_records)} records from previous checkpoints"
+            )
 
         gpu_manager = get_gpu_manager()
         parallel_enabled = (
@@ -859,22 +914,28 @@ class PostTrainingAlgorithms(AlgorithmBase):
         with tracker.track_phase(f"data_generation_{dataset}"):
             if use_parallel:
                 logger.info(
-                    f"Using parallel generation with {gpu_manager.num_gpus} GPUs"
+                    f"🔧 Using parallel generation with {gpu_manager.num_gpus} GPUs"
                 )
                 records = self._generate_data_parallel(
                     cfg, ref_model, dataset, family, round_idx, run_root
                 )
             else:
-                logger.info("Using sequential generation with optimized batching")
+                logger.info("🔧 Using sequential generation with optimized batching")
                 records = self._generate_data_sequential(
                     cfg, ref_model, dataset, family, round_idx, run_root
                 )
 
-        if not records:
+        all_records = existing_records + records
+
+        if not all_records:
             return
 
-        new_ds = Dataset.from_list(records)
+        logger.info(f"💾 Saving {len(all_records)} total records")
+        new_ds = Dataset.from_list(all_records)
         merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
+
+        clear_checkpoints(checkpoint_dir)
+        logger.info(f"🧹 Cleared checkpoints")
 
     def _generate_data_sequential(
         self,
@@ -1061,9 +1122,12 @@ class PostTrainingAlgorithms(AlgorithmBase):
                         cfg,
                         ref_model,
                         dataset,
+                        family,
+                        round_idx,
                         samples_per_example,
                         int(cfg.data_collection.seed) + worker_id,
                         result_queue,
+                        run_root,
                     ),
                 )
                 p.start()
@@ -1100,9 +1164,12 @@ class PostTrainingAlgorithms(AlgorithmBase):
         cfg: DictConfig,
         ref_model: str,
         dataset: str,
+        family: str,
+        round_idx: int,
         samples_per_example: int,
         seed: int,
         result_queue,
+        run_root: Optional[Path] = None,
     ):
         """Worker for DPO-style generation."""
         try:
@@ -1200,6 +1267,17 @@ class PostTrainingAlgorithms(AlgorithmBase):
                 )
 
             logger.info(f"✅ Worker {worker_id} generated {len(records)} records")
+
+            from pita.core.io import get_checkpoint_dir, save_checkpoint
+
+            if run_root is None:
+                run_root = get_run_root()
+            checkpoint_dir = get_checkpoint_dir(
+                self.algo_key, dataset, family, round_idx, run_root
+            )
+            save_checkpoint(checkpoint_dir, worker_id, records)
+            logger.info(f"💾 Worker {worker_id} saved checkpoint")
+
             result_queue.put(records)
 
         except Exception as e:
