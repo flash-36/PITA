@@ -187,47 +187,44 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
                     ],
                 )
 
-                if current_state in (JobState.MODEL_TRAINED, JobState.EVAL_COMPLETED):
-                    logger.info(f"⏭️  STAGE 2/3: MODEL TRAINING - Already done")
-                    result = None
-                else:
-                    with logging_context(stage="TRAINING"):
-                        logger.info(f"\n{'─'*100}")
-                        logger.info(f"🏋️  STAGE 2/3: MODEL TRAINING - Starting")
-                        logger.info(f"{'─'*100}")
+                with logging_context(stage="TRAINING"):
+                    logger.info(f"\n{'─'*100}")
+                    logger.info(f"🏋️  STAGE 2/3: MODEL TRAINING - Starting")
+                    logger.info(f"{'─'*100}")
 
-                        train_start = time.time()
+                    train_start = time.time()
 
-                        import inspect
+                    import inspect
 
-                        sig = inspect.signature(algo.run)
-                        if "run_root" in sig.parameters:
-                            result = algo.run(
-                                cfg=cfg,
-                                ref_model=ref_for_train,
-                                cls_model=job.value_model_alias,
-                                dataset=job.dataset_name,
-                                family=job.family_name,
-                                output_dir=out_dir,
-                                round_idx=job.round_idx,
-                                run_root=run_root,
-                            )
-                        else:
-                            result = algo.run(
-                                cfg=cfg,
-                                ref_model=ref_for_train,
-                                cls_model=job.value_model_alias,
-                                dataset=job.dataset_name,
-                                family=job.family_name,
-                                output_dir=out_dir,
-                                round_idx=job.round_idx,
-                            )
-
-                        train_elapsed = time.time() - train_start
-                        state_manager.update_state(job.job_id, JobState.MODEL_TRAINED)
-                        logger.info(
-                            f"✅ STAGE 2/3: MODEL TRAINING - Complete ({train_elapsed:.1f}s)"
+                    # algo.run() handles phase skipping internally via check_phase_complete
+                    sig = inspect.signature(algo.run)
+                    if "run_root" in sig.parameters:
+                        result = algo.run(
+                            cfg=cfg,
+                            ref_model=ref_for_train,
+                            cls_model=job.value_model_alias,
+                            dataset=job.dataset_name,
+                            family=job.family_name,
+                            output_dir=out_dir,
+                            round_idx=job.round_idx,
+                            run_root=run_root,
                         )
+                    else:
+                        result = algo.run(
+                            cfg=cfg,
+                            ref_model=ref_for_train,
+                            cls_model=job.value_model_alias,
+                            dataset=job.dataset_name,
+                            family=job.family_name,
+                            output_dir=out_dir,
+                            round_idx=job.round_idx,
+                        )
+
+                    train_elapsed = time.time() - train_start
+                    state_manager.update_state(job.job_id, JobState.MODEL_TRAINED)
+                    logger.info(
+                        f"✅ STAGE 2/3: MODEL TRAINING - Complete ({train_elapsed:.1f}s)"
+                    )
 
                 with logging_context(stage="EVAL"):
                     logger.info(f"\n{'─'*100}")

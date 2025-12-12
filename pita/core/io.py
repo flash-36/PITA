@@ -106,11 +106,24 @@ def check_model_trained(
     round_idx: int,
     run_root: Path,
 ) -> bool:
-    """Check if model training is complete for a job."""
+    """Check if model training is complete for a job.
+    
+    For HF-based algorithms, checks for config.json which is only present after
+    a full model save. For other algorithms (PITA, QSharp, QSharp-HF), checks
+    for classifier.pt which is the trained classifier checkpoint.
+    """
     family_cap = str(family).capitalize()
     r = int(round_idx) + 1
     model_path = run_root / "models" / algo_key / f"{dataset}_{family_cap}_r{r}"
-    return model_path.exists() and any(model_path.iterdir())
+    if not model_path.exists():
+        return False
+    
+    # Check for HF model files (DPO, GRPO, GRPO-HF after final training)
+    has_hf_model = (model_path / "config.json").exists()
+    # Check for classifier checkpoint (PITA, QSharp, QSharp-HF)
+    has_classifier = (model_path / "classifier.pt").exists()
+    
+    return has_hf_model or has_classifier
 
 
 def check_eval_completed(
