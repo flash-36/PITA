@@ -123,12 +123,52 @@ class GuidedHFModel:
         max_new_tokens: int,
         greedy: bool,
         batch_size: int = 8,
-    ) -> List[str]:
-        """Batch continuation without guidance."""
-        return self.ref.continue_from_context_batch(
-            contexts,
-            max_new_tokens,
-            greedy,
-            logits_processor=None,
-            batch_size=batch_size,
-        )
+        return_scores: bool = False,
+    ) -> List[str] | tuple[List[str], List[torch.Tensor]]:
+        """Batch continuation WITH guidance.
+        
+        For guided models, we generate one at a time to properly apply the classifier
+        guidance at each step. This is slower but necessary for correct guided generation.
+        
+        Args:
+            return_scores: If True, also return the guided logits/scores at each step.
+                          These are the scores AFTER applying the classifier guidance.
+        """
+        all_results = []
+        all_scores = [] if return_scores else None
+        
+        from tqdm import tqdm
+        for context in tqdm(contexts, desc="Guided generation", leave=False):
+            proc = self._build_processor()
+            self._reset_state(proc)
+            
+            if return_scores:
+                # Generate with scores
+                texts, scores = self.ref.continue_from_context_batch(
+                    [context],
+                    max_new_tokens,
+                    greedy,
+                    logits_processor=proc,
+                    batch_size=1,
+                    return_scores=True,
+                )
+                all_results.append(texts[0])
+                if scores:
+                    all_scores.append(scores[0])
+            else:
+                texts = self.ref.continue_from_context_batch(
+                    [context],
+                    max_new_tokens,
+                    greedy,
+                    logits_processor=proc,
+                    batch_size=1,
+                    return_scores=False,
+                )
+                all_results.append(texts[0])
+            
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        if return_scores:
+            return all_results, all_scores
+        return all_results

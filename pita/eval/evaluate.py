@@ -86,6 +86,122 @@ def _kl_divergence(
 
 
 @torch.inference_mode()
+def _compute_kl_fast_with_scores(
+    ref_model: HFModel,
+    prompt_texts: List[str],
+    continuation_texts: List[str],
+    saved_scores: List[torch.Tensor],
+    batch_size: int = 8,
+    sample_ratio: float = 1.0,
+) -> List[float]:
+    """Fast KL computation using pre-saved guided scores.
+    
+    This is ~600x faster than recomputing guided logits for each token.
+    
+    Args:
+        ref_model: The reference model to compute ref logits
+        prompt_texts: List of prompt strings
+        continuation_texts: List of continuation strings (generated text)
+        saved_scores: List of saved guided scores from generation, each [seq_len, vocab_size]
+        batch_size: Batch size for ref model forward pass
+        sample_ratio: Fraction of examples to compute KL for
+    """
+    n_total = len(prompt_texts)
+    
+    # Sample subset if ratio < 1.0
+    if sample_ratio < 1.0 and n_total > 0:
+        n_sample = max(1, int(n_total * sample_ratio))
+        random.seed(42)
+        sample_indices = sorted(random.sample(range(n_total), n_sample))
+        prompt_texts = [prompt_texts[i] for i in sample_indices]
+        continuation_texts = [continuation_texts[i] for i in sample_indices]
+        saved_scores = [saved_scores[i] for i in sample_indices]
+        logger.info(f"📊 KL sampling: {n_sample}/{n_total} examples ({sample_ratio*100:.0f}%)")
+    
+    tok = ref_model.tokenizer
+    device = ref_model.model.device
+    kl_results: List[float] = []
+    
+    for i in tqdm(range(0, len(prompt_texts), batch_size), desc="Fast KL", leave=False):
+        batch_prompts = prompt_texts[i : i + batch_size]
+        batch_conts = continuation_texts[i : i + batch_size]
+        batch_scores = saved_scores[i : i + batch_size]
+        
+        batch_prompt_lens = []
+        batch_input_ids = []
+        batch_attention_masks = []
+        
+        for prompt_text, cont_text in zip(batch_prompts, batch_conts):
+            ids_prompt = tok(prompt_text, return_tensors="pt")
+            ids_cont = tok(cont_text, return_tensors="pt", add_special_tokens=False)
+            concat_input_ids = torch.cat(
+                [ids_prompt["input_ids"], ids_cont["input_ids"]], dim=1
+            )
+            attention_mask = concat_input_ids.ne(
+                getattr(tok, "pad_token_id", tok.eos_token_id)
+            ).long()
+            
+            batch_prompt_lens.append(ids_prompt["input_ids"].shape[1])
+            batch_input_ids.append(concat_input_ids.squeeze(0))
+            batch_attention_masks.append(attention_mask.squeeze(0))
+        
+        max_len = max(x.shape[0] for x in batch_input_ids)
+        pad_id = getattr(tok, "pad_token_id", tok.eos_token_id)
+        
+        padded_input_ids = []
+        padded_attention_masks = []
+        for input_ids, attention_mask in zip(batch_input_ids, batch_attention_masks):
+            pad_len = max_len - input_ids.shape[0]
+            padded_input_ids.append(F.pad(input_ids, (0, pad_len), value=pad_id))
+            padded_attention_masks.append(F.pad(attention_mask, (0, pad_len), value=0))
+        
+        batched_input_ids = torch.stack(padded_input_ids).to(device)
+        batched_attention_masks = torch.stack(padded_attention_masks).to(device)
+        
+        # Single forward pass through ref model
+        ref_out = ref_model.model(
+            input_ids=batched_input_ids,
+            attention_mask=batched_attention_masks,
+            use_cache=False,
+        )
+        
+        # Compute KL for each example using saved scores
+        for idx, prompt_len in enumerate(batch_prompt_lens):
+            ref_logits_steps = ref_out.logits[idx, prompt_len - 1 : -1, :]  # [seq_len, vocab]
+            
+            if ref_logits_steps.numel() == 0:
+                kl_results.append(0.0)
+                continue
+            
+            # Get saved guided scores for this example
+            guided_scores = batch_scores[idx].to(device)  # [seq_len, vocab]
+            
+            # Align lengths (generation might have different length than tokenized continuation)
+            min_len = min(guided_scores.shape[0], ref_logits_steps.shape[0])
+            if min_len == 0:
+                kl_results.append(0.0)
+                continue
+            
+            guided_scores = guided_scores[:min_len]
+            ref_logits_steps = ref_logits_steps[:min_len]
+            
+            # Compute KL(guided || ref) for all tokens at once
+            kl_per_token = _kl_divergence(guided_scores, ref_logits_steps)
+            kl_results.append(float(kl_per_token.sum().item()))
+        
+        del ref_out
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    # Scale up if we sampled
+    if sample_ratio < 1.0:
+        avg_kl = sum(kl_results) / max(1, len(kl_results))
+        return [avg_kl] * n_total
+    
+    return kl_results
+
+
+@torch.inference_mode()
 def _compute_traj_kl_for_text(
     policy: Any,
     ref: Optional[HFModel],
@@ -218,14 +334,14 @@ def _compute_traj_kl_batched(
 
     is_guided_model = isinstance(policy, GuidedHFModel)
     total_batches = (len(prompt_texts) + batch_size - 1) // batch_size
-
+    
     outer_pbar = tqdm(
-        range(0, len(prompt_texts), batch_size),
-        desc="Computing KL",
+        range(0, len(prompt_texts), batch_size), 
+        desc="Computing KL", 
         leave=False,
         disable=is_guided_model,
     )
-
+    
     for batch_idx, i in enumerate(outer_pbar):
         # Skip already computed batches
         if batch_idx < start_batch:
@@ -278,20 +394,20 @@ def _compute_traj_kl_batched(
                 for idx, prompt_len in enumerate(batch_prompt_lens)
                 if ref_out.logits[idx, prompt_len - 1 : -1, :].numel() > 0
             )
-
+            
             use_pbar = total_steps > 200
             pbar = (
                 tqdm(
-                    total=total_steps,
+                total=total_steps, 
                     desc=f"  KL tokens (batch {batch_idx+1}/{total_batches})",
-                    leave=False,
-                    unit="tok",
+                leave=False, 
+                unit="tok",
                     position=0,
                 )
                 if use_pbar
                 else None
             )
-
+            
             for idx, prompt_len in enumerate(batch_prompt_lens):
                 ref_logits_steps = ref_out.logits[idx : idx + 1, prompt_len - 1 : -1, :]
                 if ref_logits_steps.numel() == 0:
@@ -303,7 +419,7 @@ def _compute_traj_kl_batched(
                 kl_sum = 0.0
                 steps = ref_logits_steps.shape[1]
                 concat_input_ids = batched_input_ids[idx : idx + 1]
-
+                
                 for t in range(steps):
                     if pbar:
                         pbar.update(1)
@@ -314,7 +430,7 @@ def _compute_traj_kl_batched(
                     kl_t = _kl_divergence(guided_scores, base_scores).mean()
                     kl_sum += float(kl_t.item())
                 batch_kl_values.append(kl_sum)
-
+            
             if pbar:
                 pbar.close()
         else:
@@ -357,7 +473,7 @@ def _compute_traj_kl_batched(
     if sample_ratio < 1.0:
         avg_kl = sum(kl_results) / max(1, len(kl_results))
         return [avg_kl] * n_total
-    
+
     return kl_results
 
 
@@ -370,6 +486,16 @@ def evaluate_pass1_maj8(
 ) -> Dict[str, float]:
     with logging_context(stage="EVAL"):
         eval_start = time.time()
+        
+        # Check if evaluation already completed (results.json exists)
+        if save_dir is not None:
+            results_json = Path(save_dir) / "results.json"
+            if results_json.exists():
+                with open(results_json) as f:
+                    cached_results = json.load(f)
+                logger.info(f"✅ Evaluation already complete, loaded from {results_json}")
+                return cached_results
+        
         ds = build_test_dataset(cfg, dataset)
         if ds is None:
             return {}
@@ -401,13 +527,37 @@ def evaluate_pass1_maj8(
         # Check for checkpoint if save_dir provided
         checkpoint = {}
         completed_indices = set()
+        loaded_from_csv = False
+        grouped_preds = [[] for _ in range(len(examples))]
+        
         if save_dir is not None:
+            # First try loading from checkpoint
             checkpoint = _load_eval_checkpoint(Path(save_dir))
             if checkpoint.get("predictions"):
                 completed_indices = set(checkpoint.get("completed_indices", []))
                 logger.info(
                     f"📂 Loaded checkpoint with {len(completed_indices)} completed examples"
                 )
+                for idx_str, preds in checkpoint["predictions"].items():
+                    grouped_preds[int(idx_str)] = preds
+            else:
+                # Fallback: try loading from eval_predictions.csv if it exists
+                csv_path = Path(save_dir) / "eval_predictions.csv"
+                if csv_path.exists():
+                    import csv
+                    with open(csv_path) as f:
+                        reader = csv.DictReader(f)
+                        rows = list(reader)
+                    if rows:
+                        # Get pred columns
+                        pred_cols = sorted([c for c in rows[0].keys() if c.startswith('pred_')])
+                        if pred_cols:
+                            for idx, row in enumerate(rows):
+                                if idx < len(grouped_preds):
+                                    grouped_preds[idx] = [row[pc] for pc in pred_cols]
+                            completed_indices = set(range(len(rows)))
+                            loaded_from_csv = True
+                            logger.info(f"📂 Loaded {len(rows)} predictions from {csv_path}")
 
         # Build prompts for remaining examples
         all_prompts = []
@@ -419,16 +569,16 @@ def evaluate_pass1_maj8(
                 all_prompts.append(item["built"])
                 prompt_to_example.append(idx)
 
-        # Initialize grouped_preds from checkpoint
-        grouped_preds = [[] for _ in range(len(examples))]
-        if checkpoint.get("predictions"):
-            for idx_str, preds in checkpoint["predictions"].items():
-                grouped_preds[int(idx_str)] = preds
-
+        # Track saved scores for fast KL computation
+        saved_scores_map: Dict[int, List[torch.Tensor]] = {}
+        use_fast_kl = isinstance(model, GuidedHFModel)
+        
         if all_prompts:
             logger.info(
                 f"\n🔄 Generating {len(all_prompts)} predictions ({len(completed_indices)} already cached)..."
             )
+            if use_fast_kl:
+                logger.info(f"📊 Using fast KL computation with saved scores")
             gen_start = time.time()
 
             # Generate in chunks and checkpoint periodically
@@ -438,16 +588,31 @@ def evaluate_pass1_maj8(
                 chunk_prompts = all_prompts[chunk_start:chunk_end]
                 chunk_mapping = prompt_to_example[chunk_start:chunk_end]
 
-                chunk_preds = model.continue_from_context_batch(
-                    chunk_prompts,
-                    model.gen_cfg.max_new_tokens,
-                    greedy=False,
-                    batch_size=batch_size,
-                )
+                if use_fast_kl:
+                    # Generate with scores for fast KL
+                    chunk_preds, chunk_scores = model.continue_from_context_batch(
+                        chunk_prompts,
+                        model.gen_cfg.max_new_tokens,
+                        greedy=False,
+                        batch_size=batch_size,
+                        return_scores=True,
+                    )
+                else:
+                    chunk_preds = model.continue_from_context_batch(
+                        chunk_prompts,
+                        model.gen_cfg.max_new_tokens,
+                        greedy=False,
+                        batch_size=batch_size,
+                    )
+                    chunk_scores = [None] * len(chunk_preds)
 
-                # Group predictions
-                for ex_idx, pred in zip(chunk_mapping, chunk_preds):
+                # Group predictions and scores
+                for i, (ex_idx, pred) in enumerate(zip(chunk_mapping, chunk_preds)):
                     grouped_preds[ex_idx].append(pred)
+                    if use_fast_kl and chunk_scores[i] is not None:
+                        if ex_idx not in saved_scores_map:
+                            saved_scores_map[ex_idx] = []
+                        saved_scores_map[ex_idx].append(chunk_scores[i])
                     if len(grouped_preds[ex_idx]) == num_samples:
                         completed_indices.add(ex_idx)
 
@@ -472,12 +637,7 @@ def evaluate_pass1_maj8(
             )
 
         logger.info(f"\n📊 Computing metrics and KL divergence...")
-        from pita.models.guided import GuidedHFModel
 
-        if isinstance(model, GuidedHFModel):
-            logger.info(
-                f"⚠️  KL computation for guided models processes tokens step-by-step - this may take several minutes"
-            )
         kl_start = time.time()
         total = 0
         pass1 = 0
@@ -486,8 +646,9 @@ def evaluate_pass1_maj8(
 
         pass1_prompts = []
         pass1_conts = []
+        pass1_scores = []
 
-        for item, preds in zip(prompts_data, grouped_preds):
+        for idx, (item, preds) in enumerate(zip(prompts_data, grouped_preds)):
             if not preds:
                 continue
             if has_verifier and ds.is_correct(item["ex"].answer, preds[0]):
@@ -506,6 +667,12 @@ def evaluate_pass1_maj8(
             total += 1
             pass1_prompts.append(item["built"])
             pass1_conts.append(preds[0])
+            
+            # Get first sample's scores for KL (if available)
+            if idx in saved_scores_map and saved_scores_map[idx]:
+                pass1_scores.append(saved_scores_map[idx][0])
+            else:
+                pass1_scores.append(None)
 
             rows.append(
                 {
@@ -516,15 +683,53 @@ def evaluate_pass1_maj8(
             )
 
         kl_sample_ratio = float(getattr(cfg.evaluation, "kl_sample_ratio", 1.0) or 1.0)
-        kl_values = _compute_traj_kl_batched(
-            model,
-            ref_model,
-            prompt_texts=pass1_prompts,
-            continuation_texts=pass1_conts,
-            batch_size=batch_size,
-            sample_ratio=kl_sample_ratio,
-            save_dir=Path(save_dir) if save_dir else None,
-        )
+        
+        # Use fast KL if we have saved scores
+        if use_fast_kl and pass1_scores and any(s is not None for s in pass1_scores):
+            # Filter to only examples with scores
+            valid_indices = [i for i, s in enumerate(pass1_scores) if s is not None]
+            if valid_indices:
+                logger.info(f"🚀 Using fast KL computation with {len(valid_indices)} saved score sets")
+                ref_for_kl = model.ref if isinstance(model, GuidedHFModel) else ref_model
+                kl_values = _compute_kl_fast_with_scores(
+                    ref_for_kl,
+                    [pass1_prompts[i] for i in valid_indices],
+                    [pass1_conts[i] for i in valid_indices],
+                    [pass1_scores[i] for i in valid_indices],
+                    batch_size=batch_size,
+                    sample_ratio=kl_sample_ratio,
+                )
+                # Map back to full list
+                full_kl_values = [0.0] * len(pass1_prompts)
+                for i, kl in zip(valid_indices, kl_values):
+                    full_kl_values[i] = kl
+                kl_values = full_kl_values
+            else:
+                logger.warning("⚠️  No saved scores available, falling back to slow KL computation")
+                kl_values = _compute_traj_kl_batched(
+                    model,
+                    ref_model,
+                    prompt_texts=pass1_prompts,
+                    continuation_texts=pass1_conts,
+                    batch_size=batch_size,
+                    sample_ratio=kl_sample_ratio,
+                    save_dir=Path(save_dir) if save_dir else None,
+                )
+        else:
+            if isinstance(model, GuidedHFModel):
+                logger.info(
+                    f"⚠️  KL computation for guided models processes tokens step-by-step - this may take several minutes"
+                )
+            kl_values = _compute_traj_kl_batched(
+                model,
+                ref_model,
+                prompt_texts=pass1_prompts,
+                continuation_texts=pass1_conts,
+                batch_size=batch_size,
+                sample_ratio=kl_sample_ratio,
+                save_dir=Path(save_dir) if save_dir else None,
+            )
+        
         sum_kl = sum(kl_values)
         kl_elapsed = time.time() - kl_start
         logger.info(f"✅ KL computation complete ({kl_elapsed:.1f}s)")
@@ -546,12 +751,19 @@ def evaluate_pass1_maj8(
             "avg_kl": float(sum_kl / max(1, total)),
             "num_examples": int(total),
         }
-
+        
         logger.info(f"\n✅ Evaluation complete ({eval_elapsed:.1f}s)")
         logger.info(f"   pass@1: {results['pass@1']:.3f}")
         logger.info(f"   maj@8: {results['maj@8']:.3f}")
         logger.info(f"   avg_kl: {results['avg_kl']:.3f}")
-
+        
+        # Save results to JSON for caching
+        if save_dir is not None:
+            results_json = Path(save_dir) / "results.json"
+            with open(results_json, "w") as f:
+                json.dump(results, f, indent=2)
+            logger.info(f"💾 Saved results to {results_json}")
+        
         return results
 
 
@@ -563,12 +775,21 @@ def evaluate_avg_reward(
     save_dir: Optional[Path] = None,
 ) -> Dict[str, float]:
     with logging_context(stage="EVAL"):
+        # Check if evaluation already completed (results.json exists)
+        if save_dir is not None:
+            results_json = Path(save_dir) / "results.json"
+            if results_json.exists():
+                with open(results_json) as f:
+                    cached_results = json.load(f)
+                logger.info(f"✅ Evaluation already complete, loaded from {results_json}")
+                return cached_results
+        
         logger.info(f"\n{'▸'*50}")
         logger.info(f"📊 Evaluating: {dataset}")
         logger.info(f"   Metric: average reward")
         logger.info(f"{'▸'*50}")
         eval_start = time.time()
-
+        
         ds = build_test_dataset(cfg, dataset)
         if ds is None:
             return {}
@@ -611,20 +832,38 @@ def evaluate_avg_reward(
 
         # Check for checkpoint
         checkpoint = {}
+        loaded_from_csv = False
         if save_dir is not None:
             checkpoint = _load_eval_checkpoint(Path(save_dir))
             if checkpoint.get("predictions"):
                 logger.info(
                     f"📂 Loaded checkpoint with {len(checkpoint['predictions'])} predictions"
                 )
+            else:
+                # Fallback: try loading from eval_predictions.csv if it exists
+                csv_path = Path(save_dir) / "eval_predictions.csv"
+                if csv_path.exists():
+                    import csv
+                    with open(csv_path) as f:
+                        reader = csv.DictReader(f)
+                        rows = list(reader)
+                    if rows and 'pred' in rows[0]:
+                        checkpoint["predictions"] = [row['pred'] for row in rows]
+                        loaded_from_csv = True
+                        logger.info(f"📂 Loaded {len(rows)} predictions from {csv_path}")
 
         # PHASE 2: Generate predictions (with checkpointing)
         preds = checkpoint.get("predictions", [])
+        saved_scores: List[Optional[torch.Tensor]] = [None] * len(preds)  # For fast KL
+        use_fast_kl = isinstance(model, GuidedHFModel)
+        
         if len(preds) < len(prompts_data):
             remaining_prompts = [item["built"] for item in prompts_data[len(preds) :]]
             logger.info(
                 f"🔄 Generating {len(remaining_prompts)} predictions ({len(preds)} already cached)..."
             )
+            if use_fast_kl:
+                logger.info(f"📊 Using fast KL computation with saved scores")
 
             # Generate in chunks and checkpoint
             chunk_size = batch_size * 20
@@ -632,13 +871,25 @@ def evaluate_avg_reward(
                 chunk_end = min(chunk_start + chunk_size, len(remaining_prompts))
                 chunk_prompts = remaining_prompts[chunk_start:chunk_end]
 
-                chunk_preds = model.continue_from_context_batch(
-                    chunk_prompts,
-                    model.gen_cfg.max_new_tokens,
-                    greedy=False,
-                    batch_size=batch_size,
-                )
-                preds.extend(chunk_preds)
+                if use_fast_kl:
+                    chunk_preds, chunk_scores = model.continue_from_context_batch(
+                        chunk_prompts,
+                        model.gen_cfg.max_new_tokens,
+                        greedy=False,
+                        batch_size=batch_size,
+                        return_scores=True,
+                    )
+                    preds.extend(chunk_preds)
+                    saved_scores.extend(chunk_scores)
+                else:
+                    chunk_preds = model.continue_from_context_batch(
+                        chunk_prompts,
+                        model.gen_cfg.max_new_tokens,
+                        greedy=False,
+                        batch_size=batch_size,
+                    )
+                    preds.extend(chunk_preds)
+                    saved_scores.extend([None] * len(chunk_preds))
 
                 # Save checkpoint
                 if save_dir is not None:
@@ -649,7 +900,7 @@ def evaluate_avg_reward(
         else:
             logger.info(
                 f"✅ All {len(prompts_data)} predictions loaded from checkpoint"
-            )
+        )
 
         # PHASE 3: Batch score all predictions
         logger.info("✅ Batching reward scoring...")
@@ -662,15 +913,51 @@ def evaluate_avg_reward(
         logger.info("✅ Computing KL divergence...")
         all_prompts = [item["built"] for item in prompts_data]
         kl_sample_ratio = float(getattr(cfg.evaluation, "kl_sample_ratio", 1.0) or 1.0)
-        kl_values = _compute_traj_kl_batched(
-            model,
-            ref_model,
-            prompt_texts=all_prompts,
-            continuation_texts=preds,
-            batch_size=batch_size,
-            sample_ratio=kl_sample_ratio,
-            save_dir=Path(save_dir) if save_dir else None,
-        )
+        
+        # Use fast KL if we have saved scores
+        if use_fast_kl and saved_scores and any(s is not None for s in saved_scores):
+            valid_indices = [i for i, s in enumerate(saved_scores) if s is not None]
+            if valid_indices:
+                logger.info(f"🚀 Using fast KL computation with {len(valid_indices)} saved score sets")
+                ref_for_kl = model.ref if isinstance(model, GuidedHFModel) else ref_model
+                kl_values = _compute_kl_fast_with_scores(
+                    ref_for_kl,
+                    [all_prompts[i] for i in valid_indices],
+                    [preds[i] for i in valid_indices],
+                    [saved_scores[i] for i in valid_indices],
+                    batch_size=batch_size,
+                    sample_ratio=kl_sample_ratio,
+                )
+                # Map back to full list
+                full_kl_values = [0.0] * len(all_prompts)
+                for i, kl in zip(valid_indices, kl_values):
+                    full_kl_values[i] = kl
+                kl_values = full_kl_values
+            else:
+                logger.warning("⚠️  No saved scores available, falling back to slow KL computation")
+                kl_values = _compute_traj_kl_batched(
+                    model,
+                    ref_model,
+                    prompt_texts=all_prompts,
+                    continuation_texts=preds,
+                    batch_size=batch_size,
+                    sample_ratio=kl_sample_ratio,
+                    save_dir=Path(save_dir) if save_dir else None,
+                )
+        else:
+            if isinstance(model, GuidedHFModel):
+                logger.info(
+                    f"⚠️  KL computation for guided models processes tokens step-by-step - this may take several minutes"
+                )
+            kl_values = _compute_traj_kl_batched(
+                model,
+                ref_model,
+                prompt_texts=all_prompts,
+                continuation_texts=preds,
+                batch_size=batch_size,
+                sample_ratio=kl_sample_ratio,
+                save_dir=Path(save_dir) if save_dir else None,
+            )
 
         # PHASE 5: Assemble results
         total = 0
@@ -702,8 +989,17 @@ def evaluate_avg_reward(
                 ckpt_path.unlink()
 
         avg_reward = float(sum_reward / max(1, total))
-        return {
+        results = {
             "avg_reward": avg_reward,
             "avg_kl": float(sum_kl / max(1, total)),
             "num_examples": int(total),
         }
+        
+        # Save results to JSON for caching
+        if save_dir is not None:
+            results_json = Path(save_dir) / "results.json"
+            with open(results_json, "w") as f:
+                json.dump(results, f, indent=2)
+            logger.info(f"💾 Saved results to {results_json}")
+        
+        return results

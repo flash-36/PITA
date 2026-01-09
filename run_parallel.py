@@ -33,6 +33,81 @@ import pita.datasets  # trigger dataset registration
 from pita.plotting.hooks import plot_after_run
 
 
+def evaluate_base_models(cfg: DictConfig, run_root) -> Dict[str, Any]:
+    """Evaluate base reference models on all datasets.
+    
+    Returns dict of {family: {dataset: metrics}}.
+    """
+    from pathlib import Path
+    from pita.models.hf import HFModel, GenerationConfig
+    from pita.models.catalog import resolve_family_pair
+    from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
+    from pita.core.io import ensure_dir
+    
+    results_dir = Path(run_root) / "results" / "base_model"
+    results_file = results_dir / "base_model_results.json"
+    
+    # Check if already computed
+    if results_file.exists():
+        import json
+        with open(results_file) as f:
+            cached = json.load(f)
+        logger.info(f"📂 Loaded cached base model results from {results_file}")
+        return cached
+    
+    logger.info("=" * 80)
+    logger.info("📊 EVALUATING BASE REFERENCE MODEL")
+    logger.info("=" * 80)
+    
+    results: Dict[str, Any] = {}
+    model_pairs = list(cfg.model_pairs)
+    datasets = list(cfg.training.datasets)
+    
+    for family in model_pairs:
+        ref_alias, _ = resolve_family_pair(family)
+        
+        logger.info(f"\n🔧 Loading base model: {family} ({ref_alias})")
+        
+        gen_cfg = GenerationConfig(
+            max_new_tokens=int(cfg.generation.max_new_tokens),
+            temperature=float(cfg.generation.temperature),
+            top_p=float(cfg.generation.top_p),
+            use_chat_template=bool(cfg.generation.use_chat_template),
+            dtype=str(cfg.system.dtype),
+            attn_impl=str(cfg.system.attn_impl),
+            gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
+        )
+        ref = HFModel(ref_alias, gen_cfg)
+        
+        results[family] = {}
+        for dataset in datasets:
+            save_dir = results_dir / family / dataset
+            ensure_dir(save_dir)
+            
+            logger.info(f"   📊 Evaluating on {dataset}...")
+            if dataset in {"TLDR", "IMDBGen"}:
+                metrics = evaluate_avg_reward(cfg, ref, dataset, ref_model=None, save_dir=save_dir)
+            else:
+                metrics = evaluate_pass1_maj8(cfg, ref, dataset, ref_model=None, save_dir=save_dir)
+            
+            # Remove KL for base model (always 0 against itself)
+            metrics.pop("avg_kl", None)
+            results[family][dataset] = metrics
+            logger.info(f"   ✅ {dataset}: {metrics}")
+            
+            torch.cuda.empty_cache()
+        
+        del ref
+        torch.cuda.empty_cache()
+    
+    # Save results
+    ensure_dir(results_dir)
+    save_json(results_file, results)
+    logger.info(f"\n💾 Saved base model results to {results_file}")
+    
+    return results
+
+
 def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResult:
     """Execute a single training job.
 
@@ -442,6 +517,10 @@ def main(cfg: DictConfig) -> None:
 
     gpu_manager.clear_cache()
     gpu_manager.synchronize_all()
+
+    # Evaluate base models (after algorithm jobs, so it doesn't block parallel execution)
+    base_model_results = evaluate_base_models(cfg, run_root)
+    logger.info(f"📊 Base model evaluation complete")
 
     # Generate plots
     figs_dir = create_subdir(run_root, ["figures"])

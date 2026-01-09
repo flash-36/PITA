@@ -120,7 +120,6 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
             if atoms.device != log_pmfs.device:
                 atoms = atoms.to(log_pmfs.device)
             logit_offset = torch.logsumexp(log_pmfs + self.eta * atoms, dim=-1)
-            logit_offset = logit_offset - logit_offset.min(dim=-1, keepdim=True).values
             logit_offset = torch.nan_to_num(
                 logit_offset, nan=0.0, posinf=0.0, neginf=0.0
             )

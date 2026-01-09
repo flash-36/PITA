@@ -341,9 +341,20 @@ class HFModel:
         greedy: bool,
         logits_processor: Optional[LogitsProcessorList] = None,
         batch_size: int = 8,
-    ) -> List[str]:
-        """Batch continuation from multiple contexts."""
+        return_scores: bool = False,
+    ) -> List[str] | tuple[List[str], List[torch.Tensor]]:
+        """Batch continuation from multiple contexts.
+        
+        Args:
+            return_scores: If True, also return the logits/scores at each generation step.
+                          This is useful for fast KL computation.
+        
+        Returns:
+            If return_scores=False: List of generated texts
+            If return_scores=True: Tuple of (texts, scores) where scores[i] is [seq_len, vocab_size]
+        """
         all_results = []
+        all_scores = [] if return_scores else None
         num_batches = (len(contexts) + batch_size - 1) // batch_size
         mode = "greedy" if greedy else "sampled"
 
@@ -367,18 +378,43 @@ class HFModel:
                 logits_processor=logits_processor,
                 max_new_tokens=max_new_tokens,
             )
+            
+            if return_scores:
+                gen_kwargs["output_scores"] = True
+                gen_kwargs["return_dict_in_generate"] = True
+            
             out = self._generate_with_fallback(ids, gen_kwargs)
+            
+            if return_scores:
+                sequences = out.sequences
+                # Stack scores: [num_steps, batch_size, vocab_size] -> per-example [num_steps, vocab_size]
+                if out.scores:
+                    stacked_scores = torch.stack(out.scores, dim=0)  # [num_steps, batch_size, vocab_size]
+                    stacked_scores = stacked_scores.transpose(0, 1)  # [batch_size, num_steps, vocab_size]
+                else:
+                    stacked_scores = None
+            else:
+                sequences = out
 
-            for seq, prompt_len in zip(out, prompt_lengths):
+            for j, (seq, prompt_len) in enumerate(zip(sequences, prompt_lengths)):
                 new_tokens = seq[prompt_len:]
                 text = self.tokenizer.decode(
                     new_tokens, skip_special_tokens=True
                 ).strip()
                 all_results.append(text)
+                
+                if return_scores and stacked_scores is not None:
+                    # Get scores for this example, trimmed to actual generation length
+                    num_new_tokens = len(new_tokens)
+                    example_scores = stacked_scores[j, :num_new_tokens, :].cpu()
+                    all_scores.append(example_scores)
 
             del out
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
         self.tokenizer.padding_side = original_padding_side
+        
+        if return_scores:
+            return all_results, all_scores
         return all_results

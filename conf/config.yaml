@@ -48,11 +48,17 @@ data_collection:
 # Evaluation configuration
 evaluation:
   # Evaluate guided decoding at multiple eta values
-  etas: [0.25, 0.5, 1.0, 4.0]
+  etas: [0.25, ] #0.5, 1.0, 4.0]
   # Number of samples for majority voting evaluation
   num_samples: 8
   # Batch size for evaluation generation
   batch_size: 8
+  # Max examples to evaluate (0 = use full test set)
+  max_examples: 0
+  # Chunk size for incremental evaluation checkpointing
+  chunk_size: 32
+  # KL sampling ratio (0.1 = 10% of examples for faster approximate KL)
+  kl_sample_ratio: 1.0
   # For each training dataset, which datasets to evaluate on
   datasets_by_train:
     GSM8K:
@@ -68,6 +74,7 @@ evaluation:
 # Parallel execution settings
 parallel_generation: false  # Disable multi-GPU parallel generation (each job gets one GPU)
 use_parallel_execution: true  # Enable parallel job execution
+max_concurrent_jobs: 1  # Max jobs to run simultaneously (1 = sequential, prioritizes completion; null = use all GPUs)
 
 algos:
   PITA:
@@ -162,9 +169,9 @@ algos:
 
 # Model pairs; map of ref -> classifier
 model_pairs:
-  - gemma
-  - llama
-  # - phi
+  # - gemma
+  # - llama
+  - phi
   # - gpt
 
 # Datasets (present = enabled). Each entry holds dataset-specific hyperparams
