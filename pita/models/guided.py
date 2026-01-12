@@ -158,12 +158,12 @@ class GuidedHFModel:
             else:
                 texts = self.ref.continue_from_context_batch(
                     [context],
-                    max_new_tokens,
-                    greedy,
+            max_new_tokens,
+            greedy,
                     logits_processor=proc,
                     batch_size=1,
                     return_scores=False,
-                )
+        )
                 all_results.append(texts[0])
             
             if torch.cuda.is_available():

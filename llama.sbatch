@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J Gemma_PITA
+#SBATCH -J Llama_PITA
 #SBATCH -p gpu-research
 #SBATCH --qos=olympus-research-gpu
 #SBATCH --gres=gpu:a100:4
@@ -12,11 +12,6 @@ set -euo pipefail
 echo "Job $SLURM_JOB_ID on $(hostname) ($(date))"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 
-# (Optional) activate your env/modules here
-# module load cuda/12.1
-# source ~/.bashrc && conda activate pita
+python run_parallel.py --config-name=llama
 
-python run_parallel.py --config-name=gemma
-
-# python run_parallel.py --config-name=gemma resume_from=/path/to/your/gemma/checkpoint
-
+# To resume: python run_parallel.py --config-name=llama resume_from=/path/to/your/llama/checkpoint

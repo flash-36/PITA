@@ -384,7 +384,7 @@ class HFModel:
                 gen_kwargs["return_dict_in_generate"] = True
             
             out = self._generate_with_fallback(ids, gen_kwargs)
-            
+
             if return_scores:
                 sequences = out.sequences
                 # Stack scores: [num_steps, batch_size, vocab_size] -> per-example [num_steps, vocab_size]
