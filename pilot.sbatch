@@ -13,4 +13,4 @@ echo "Job $SLURM_JOB_ID on $(hostname) ($(date))"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 
 # Pilot test: phi, llama, gemma on GSM8K with minimal settings
-python run_parallel.py --config-name=pilot_test
+python run_parallel.py --config-name=pilot_test resume_from=/mnt/shared-scratch/Shakkottai_S/ujwald36/repos/PITA/outputs/2026-01-12/15-04-29

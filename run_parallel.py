@@ -18,6 +18,7 @@ from omegaconf import DictConfig, OmegaConf
 from loguru import logger
 
 from pita.core.io import create_subdir, save_json, get_run_root
+from pita.core.job_state import JobStateManager, JobState
 from pita.core.registry import get_algorithm_registry
 from pita.core.parallel_executor import (
     ParallelJobExecutor,
@@ -33,27 +34,19 @@ import pita.datasets  # trigger dataset registration
 from pita.plotting.hooks import plot_after_run
 
 
-def evaluate_base_models(cfg: DictConfig, run_root) -> Dict[str, Any]:
+def evaluate_base_models(cfg: DictConfig, run_root, state_manager: JobStateManager) -> Dict[str, Any]:
     """Evaluate base reference models on all datasets.
     
+    Uses job state tracking for resume capability.
     Returns dict of {family: {dataset: metrics}}.
     """
     from pathlib import Path
     from pita.models.hf import HFModel, GenerationConfig
     from pita.models.catalog import resolve_family_pair
     from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
-    from pita.core.io import ensure_dir
+    from pita.core.io import ensure_dir, check_base_eval_completed
     
     results_dir = Path(run_root) / "results" / "base_model"
-    results_file = results_dir / "base_model_results.json"
-    
-    # Check if already computed
-    if results_file.exists():
-        import json
-        with open(results_file) as f:
-            cached = json.load(f)
-        logger.info(f"📂 Loaded cached base model results from {results_file}")
-        return cached
     
     logger.info("=" * 80)
     logger.info("📊 EVALUATING BASE REFERENCE MODEL")
@@ -61,11 +54,61 @@ def evaluate_base_models(cfg: DictConfig, run_root) -> Dict[str, Any]:
     
     results: Dict[str, Any] = {}
     model_pairs = list(cfg.model_pairs)
-    datasets = list(cfg.training.datasets)
+    
+    # Collect all unique eval datasets from datasets_by_train
+    eval_datasets = set()
+    for train_ds in cfg.training.datasets:
+        eval_datasets.update(cfg.evaluation.datasets_by_train.get(train_ds, [train_ds]))
+    datasets = sorted(eval_datasets)
+    
+    # Count completed vs pending
+    pending_evals = []
+    for family in model_pairs:
+        for dataset in datasets:
+            job_id = f"base_model_{family}_{dataset}"
+            if state_manager.get_state(job_id) != JobState.EVAL_COMPLETED:
+                if not check_base_eval_completed(family, dataset, Path(run_root)):
+                    pending_evals.append((family, dataset, job_id))
+                else:
+                    state_manager.update_state(job_id, JobState.EVAL_COMPLETED)
+    
+    if not pending_evals:
+        logger.info("📂 All base model evaluations already completed")
+        # Load cached results
+        for family in model_pairs:
+            results[family] = {}
+            for dataset in datasets:
+                result_file = results_dir / family / dataset / "results.json"
+                if result_file.exists():
+                    import json
+                    with open(result_file) as f:
+                        results[family][dataset] = json.load(f)
+        return results
+    
+    logger.info(f"📋 {len(pending_evals)} base model evaluations pending")
+    
+    # Group pending evals by family to minimize model reloading
+    from collections import defaultdict
+    pending_by_family = defaultdict(list)
+    for family, dataset, job_id in pending_evals:
+        pending_by_family[family].append((dataset, job_id))
     
     for family in model_pairs:
-        ref_alias, _ = resolve_family_pair(family)
+        results[family] = {}
         
+        # Load cached results for this family
+        for dataset in datasets:
+            result_file = results_dir / family / dataset / "results.json"
+            if result_file.exists():
+                import json
+                with open(result_file) as f:
+                    results[family][dataset] = json.load(f)
+        
+        # Skip if no pending evals for this family
+        if family not in pending_by_family:
+            continue
+        
+        ref_alias, _ = resolve_family_pair(family)
         logger.info(f"\n🔧 Loading base model: {family} ({ref_alias})")
         
         gen_cfg = GenerationConfig(
@@ -79,8 +122,7 @@ def evaluate_base_models(cfg: DictConfig, run_root) -> Dict[str, Any]:
         )
         ref = HFModel(ref_alias, gen_cfg)
         
-        results[family] = {}
-        for dataset in datasets:
+        for dataset, job_id in pending_by_family[family]:
             save_dir = results_dir / family / dataset
             ensure_dir(save_dir)
             
@@ -93,17 +135,15 @@ def evaluate_base_models(cfg: DictConfig, run_root) -> Dict[str, Any]:
             # Remove KL for base model (always 0 against itself)
             metrics.pop("avg_kl", None)
             results[family][dataset] = metrics
+            
+            # Update state
+            state_manager.update_state(job_id, JobState.EVAL_COMPLETED)
             logger.info(f"   ✅ {dataset}: {metrics}")
             
             torch.cuda.empty_cache()
         
         del ref
         torch.cuda.empty_cache()
-    
-    # Save results
-    ensure_dir(results_dir)
-    save_json(results_file, results)
-    logger.info(f"\n💾 Saved base model results to {results_file}")
     
     return results
 
@@ -519,7 +559,7 @@ def main(cfg: DictConfig) -> None:
     gpu_manager.synchronize_all()
 
     # Evaluate base models (after algorithm jobs, so it doesn't block parallel execution)
-    base_model_results = evaluate_base_models(cfg, run_root)
+    base_model_results = evaluate_base_models(cfg, run_root, state_manager)
     logger.info(f"📊 Base model evaluation complete")
 
     # Generate plots

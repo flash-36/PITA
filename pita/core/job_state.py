@@ -86,6 +86,15 @@ class JobStateManager:
 
     def update_state(self, job_id: str, state: JobState) -> None:
         """Update state of a job and persist to disk."""
+        # Reload from disk to get any concurrent updates before saving
+        if self.state_file.exists():
+            try:
+                with open(self.state_file, "r") as f:
+                    data = json.load(f)
+                    self.states = data.get("jobs", {})
+            except (json.JSONDecodeError, ValueError):
+                pass  # Keep current state if file is corrupted
+        
         self.states[job_id] = state.value
         try:
             self._save()

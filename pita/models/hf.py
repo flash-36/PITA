@@ -403,11 +403,14 @@ class HFModel:
                 ).strip()
                 all_results.append(text)
                 
-                if return_scores and stacked_scores is not None:
-                    # Get scores for this example, trimmed to actual generation length
-                    num_new_tokens = len(new_tokens)
-                    example_scores = stacked_scores[j, :num_new_tokens, :].cpu()
-                    all_scores.append(example_scores)
+                if return_scores:
+                    if stacked_scores is not None:
+                        num_new_tokens = len(new_tokens)
+                        example_scores = stacked_scores[j, :num_new_tokens, :].cpu()
+                        all_scores.append(example_scores)
+                    else:
+                        # Append None to maintain alignment with results
+                        all_scores.append(None)
 
             del out
             if torch.cuda.is_available():

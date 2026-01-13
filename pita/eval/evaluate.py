@@ -82,7 +82,11 @@ def _kl_divergence(
     p_logprob = F.log_softmax(policy_logits, dim=-1)
     q_logprob = F.log_softmax(ref_logits, dim=-1)
     p_prob = p_logprob.exp()
-    return torch.sum(p_prob * (p_logprob - q_logprob), dim=-1)
+    kl = p_prob * (p_logprob - q_logprob)
+    # When p=0 and q=0, we get 0 * (-inf - -inf) = 0 * NaN = NaN
+    # The correct contribution when p=0 is 0, so replace NaN with 0
+    kl = torch.nan_to_num(kl, nan=0.0, posinf=0.0, neginf=0.0)
+    return torch.sum(kl, dim=-1)
 
 
 @torch.inference_mode()

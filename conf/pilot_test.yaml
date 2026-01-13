@@ -108,3 +108,19 @@ datasets:
     reward_model: weqweasdas/RM-Gemma-2B
     test_hf_config: main
     test_split: test
+  MATH:
+    train_hf_config: ''
+    train_split: test
+    question_key: problem
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: ''
+    test_split: test
+  AIME:
+    train_hf_config: AIME2025-I
+    train_split: test
+    question_key: question
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: AIME2025-I
+    test_split: test

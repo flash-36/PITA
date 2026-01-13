@@ -147,6 +147,16 @@ def check_eval_completed(
     return result_path.exists()
 
 
+def check_base_eval_completed(
+    family: str,
+    dataset: str,
+    run_root: Path,
+) -> bool:
+    """Check if base model evaluation is complete."""
+    result_path = run_root / "results" / "base_model" / str(family) / dataset / "results.json"
+    return result_path.exists()
+
+
 def mark_phase_complete(
     phase_name: str,
     algo_key: str,

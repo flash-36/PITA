@@ -153,8 +153,8 @@ class GuidedHFModel:
                     return_scores=True,
                 )
                 all_results.append(texts[0])
-                if scores:
-                    all_scores.append(scores[0])
+                # Append score (or None if empty) to maintain alignment with results
+                all_scores.append(scores[0] if scores else None)
             else:
                 texts = self.ref.continue_from_context_batch(
                     [context],
