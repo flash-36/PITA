@@ -11,6 +11,105 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from pita.models.catalog import resolve_model_id
 
 
+def _expand_cache_for_candidates(cache: Any, bs: int, top_k: int) -> Any:
+    """Expand a KV cache for parallel candidate scoring.
+
+    Handles both:
+    - Legacy tuple format: tuple of (key, value) tuples per layer
+    - Modern Cache objects: DynamicCache with key_cache/value_cache lists
+    """
+    # Handle legacy tuple format (tuple of tuples)
+    if isinstance(cache, tuple):
+        # Try to convert to DynamicCache first if available, as modern models expect it
+        try:
+            from transformers.cache_utils import DynamicCache
+
+            expanded = DynamicCache()
+            for layer_idx, layer_kv in enumerate(cache):
+                if isinstance(layer_kv, tuple) and len(layer_kv) == 2:
+                    key, value = layer_kv
+                    # key/value shape: [bs, num_heads, seq_len, head_dim]
+                    shape = list(key.shape)
+                    exp_key = (
+                        key.unsqueeze(1)
+                        .expand(bs, top_k, *shape[1:])
+                        .reshape(bs * top_k, *shape[1:])
+                    )
+                    exp_value = (
+                        value.unsqueeze(1)
+                        .expand(bs, top_k, *shape[1:])
+                        .reshape(bs * top_k, *shape[1:])
+                    )
+                    expanded.update(exp_key, exp_value, layer_idx)
+                else:
+                    # Fallback to legacy tuple if structure implies it's not a standard KV pair
+                    # This prevents breaking if the tuple contains something else
+                    raise ImportError("Cannot convert to DynamicCache")
+            return expanded
+        except (ImportError, AttributeError):
+            # Fallback to legacy tuple expansion
+            expanded_list = []
+            for layer_kv in cache:
+                if isinstance(layer_kv, tuple) and len(layer_kv) == 2:
+                    key, value = layer_kv
+                    # key/value shape: [bs, num_heads, seq_len, head_dim]
+                    shape = list(key.shape)
+                    exp_key = (
+                        key.unsqueeze(1)
+                        .expand(bs, top_k, *shape[1:])
+                        .reshape(bs * top_k, *shape[1:])
+                    )
+                    exp_value = (
+                        value.unsqueeze(1)
+                        .expand(bs, top_k, *shape[1:])
+                        .reshape(bs * top_k, *shape[1:])
+                    )
+                    expanded_list.append((exp_key, exp_value))
+                else:
+                    expanded_list.append(layer_kv)
+            return tuple(expanded_list)
+
+    # Handle modern Cache objects (DynamicCache, etc.)
+    # Try to access the underlying storage
+    key_cache = getattr(cache, "key_cache", None) or getattr(cache, "_key_cache", None)
+    value_cache = getattr(cache, "value_cache", None) or getattr(
+        cache, "_value_cache", None
+    )
+
+    if key_cache is not None and value_cache is not None:
+        # It's a Cache-like object with key/value lists
+        try:
+            from transformers.cache_utils import DynamicCache
+
+            expanded = DynamicCache()
+            for layer_idx in range(len(key_cache)):
+                key = key_cache[layer_idx]
+                value = value_cache[layer_idx]
+                shape = list(key.shape)
+                exp_key = (
+                    key.unsqueeze(1)
+                    .expand(bs, top_k, *shape[1:])
+                    .reshape(bs * top_k, *shape[1:])
+                )
+                exp_value = (
+                    value.unsqueeze(1)
+                    .expand(bs, top_k, *shape[1:])
+                    .reshape(bs * top_k, *shape[1:])
+                )
+                expanded.update(exp_key, exp_value, layer_idx)
+            return expanded
+        except ImportError:
+            pass
+
+    # Fallback: try to convert to legacy and expand
+    if hasattr(cache, "to_legacy_cache"):
+        legacy = cache.to_legacy_cache()
+        return _expand_cache_for_candidates(legacy, bs, top_k)
+
+    # Last resort: return as-is (will likely fail downstream)
+    return cache
+
+
 class ValueClassifier(nn.Module):
     def __init__(
         self,
@@ -61,7 +160,6 @@ class ValueClassifier(nn.Module):
             self.atoms = torch.linspace(self.V_min, self.V_max, self.num_atoms).float()
 
         out_dim = 1 if self.loss_type != "mle" else self.num_atoms
-        # Ensure the classifier head matches the backbone parameter dtype/device
         backbone_param = next(self.backbone.parameters())
         self.score = nn.Linear(
             hidden_size,
@@ -71,7 +169,6 @@ class ValueClassifier(nn.Module):
             dtype=backbone_param.dtype,
         )
         if device is not None:
-            # Keep explicit device move for safety in case backbone moved after init
             self.score = self.score.to(device)
 
     @property
@@ -155,81 +252,77 @@ class ValueClassifier(nn.Module):
         use_cache: Optional[bool] = None,
         past_key_values: Optional[Any] = None,
     ) -> Any:
-        pad_id = getattr(self.tokenizer, "pad_token_id", 0)
+        """Score candidate tokens for guided generation.
+
+        This method uses a two-phase approach:
+        1. Process/update the prefix to get prefix KV cache
+        2. Score all candidates in parallel using the prefix cache
+        """
         bs, seq_len = input_ids.shape
         top_k = logit_indices.size(1)
 
-        chunk_size = 10
-        if top_k <= chunk_size:
-            chunk_size = top_k
-
-        all_logits = []
-        saved_past_key_values = None
-
-        for chunk_start in range(0, top_k, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, top_k)
-            chunk_indices = logit_indices[:, chunk_start:chunk_end]
-            chunk_k = chunk_indices.size(1)
-
-            base = input_ids
-            expanded = (
-                base.unsqueeze(1)
-                .expand(bs, chunk_k, seq_len)
-                .contiguous()
-                .view(bs * chunk_k, seq_len)
-            )
-            cand = chunk_indices.reshape(bs * chunk_k, 1)
-            expanded_ids = torch.cat([expanded, cand.to(expanded.device)], dim=1)
-            if attention_mask is not None:
-                base_mask = (
-                    attention_mask.unsqueeze(1)
-                    .expand(bs, chunk_k, seq_len)
-                    .contiguous()
-                    .view(bs * chunk_k, seq_len)
-                )
-                expanded_mask = torch.cat(
-                    [
-                        base_mask,
-                        torch.ones(
-                            (bs * chunk_k, 1),
-                            dtype=base_mask.dtype,
-                            device=base_mask.device,
-                        ),
-                    ],
-                    dim=1,
-                )
-            else:
-                expanded_mask = expanded_ids.ne(pad_id).long()
-
-            out = self.backbone(
-                input_ids=expanded_ids,
-                attention_mask=expanded_mask,
-                use_cache=use_cache,
-                past_key_values=past_key_values,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-            last_hidden = out.hidden_states[-1][:, -1]
-            chunk_logits = self.score(last_hidden)
-
-            if self.loss_type == "mle":
-                chunk_logits = chunk_logits.view(bs, chunk_k, self.num_atoms)
-            else:
-                chunk_logits = chunk_logits.view(bs, chunk_k)
-
-            all_logits.append(chunk_logits)
-
-            if use_cache and chunk_start == 0:
-                saved_past_key_values = getattr(out, "past_key_values", None)
-
-            del out, last_hidden, expanded_ids, expanded_mask
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        cand_logits = torch.cat(all_logits, dim=1)
-        return SimpleNamespace(
-            logits=cand_logits, past_key_values=saved_past_key_values
+        # Phase 1: Process prefix to get/update prefix KV cache
+        prefix_out = self.backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=True,
+            past_key_values=past_key_values,
+            output_hidden_states=False,
+            return_dict=True,
         )
+        prefix_pkv = prefix_out.past_key_values
+        del prefix_out
+
+        # Phase 2: Score all candidates in parallel using prefix cache
+        # Expand the cache for all candidates
+        expanded_pkv = _expand_cache_for_candidates(prefix_pkv, bs, top_k)
+
+        # Expand attention mask and add position for candidate token
+        if attention_mask is not None:
+            mask_len = attention_mask.shape[1]
+            expanded_mask = (
+                attention_mask.unsqueeze(1)
+                .expand(bs, top_k, mask_len)
+                .reshape(bs * top_k, mask_len)
+            )
+            # Add attention for the candidate token
+            expanded_mask = torch.cat(
+                [
+                    expanded_mask,
+                    torch.ones(
+                        (bs * top_k, 1),
+                        dtype=expanded_mask.dtype,
+                        device=expanded_mask.device,
+                    ),
+                ],
+                dim=1,
+            )
+        else:
+            expanded_mask = None
+
+        # Candidate tokens as input
+        candidate_ids = logit_indices.reshape(bs * top_k, 1)
+
+        # Run candidates through model
+        cand_out = self.backbone(
+            input_ids=candidate_ids,
+            attention_mask=expanded_mask,
+            use_cache=False,
+            past_key_values=expanded_pkv,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+        last_hidden = cand_out.hidden_states[-1][:, -1]
+        logits = self.score(last_hidden)
+
+        if self.loss_type == "mle":
+            logits = logits.view(bs, top_k, self.num_atoms)
+        else:
+            logits = logits.view(bs, top_k)
+
+        # Return prefix PKV for next step
+        return SimpleNamespace(logits=logits, past_key_values=prefix_pkv)
 
     def forward(
         self,

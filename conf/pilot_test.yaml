@@ -6,7 +6,7 @@ resume_from: null
 system:
   dtype: bfloat16
   amp_dtype: bfloat16
-  attn_impl: eager
+  attn_impl: sdpa
   clear_cache_interval: 10
 generation:
   max_new_tokens: 512  # Shorter for faster testing
@@ -58,7 +58,7 @@ algos:
       eta: 1.0
       mode: bernoulli
       top_k: 20
-      use_cache: false
+      use_cache: true
   QSharp:
     epochs: 2
     batch_size: 2
@@ -76,7 +76,7 @@ algos:
       eta: 1.0
       mode: bernoulli
       top_k: 20
-      use_cache: false
+      use_cache: true
   QSharp-HF:
     epochs: 2
     proxy_epochs: 2
@@ -97,7 +97,7 @@ algos:
       eta: 1.0
       mode: expectation
       top_k: 20
-      use_cache: false
+      use_cache: true
 model_pairs:
 - phi
 - llama

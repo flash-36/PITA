@@ -93,7 +93,7 @@ algos:
       eta: 1.0
       mode: bernoulli
       top_k: 20
-      use_cache: false
+      use_cache: true
   QSharp:
     epochs: 10
     batch_size: 64  
@@ -110,7 +110,7 @@ algos:
       eta: 1.0
       mode: bernoulli
       top_k: 20
-      use_cache: false
+      use_cache: true
   QSharp-HF:
     epochs: 10              # ValueClassifier training epochs (Phase 3)
     proxy_epochs: 5        # Proxy RM training epochs (Phase 1)
@@ -130,7 +130,7 @@ algos:
       eta: 1.0
       mode: expectation
       top_k: 20
-      use_cache: false
+      use_cache: true
   DPO:
     beta: 0.1
     lr: 2.0e-5
