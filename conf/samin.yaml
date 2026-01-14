@@ -1,5 +1,5 @@
 experiment:
-  name: phi_trial
+  name: gemma_trial
   seed: 42
 rounds_of_training: 1
 resume_from: null
@@ -33,7 +33,7 @@ evaluation:
   - 1.0
   - 4.0
   num_samples: 8
-  batch_size: 16
+  batch_size: 32
   max_examples: 250
   kl_sample_ratio: 0.1  # 10% of examples for approximate KL
   datasets_by_train:
@@ -50,8 +50,8 @@ use_parallel_execution: true
 algos:
   PITA:
     epochs: 10
-    batch_size: 2
-    eval_batch_size: 2
+    batch_size: 32
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -68,8 +68,8 @@ algos:
       use_cache: false
   QSharp:
     epochs: 10
-    batch_size: 2
-    eval_batch_size: 2
+    batch_size: 32
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -87,8 +87,8 @@ algos:
   QSharp-HF:
     epochs: 10
     proxy_epochs: 5
-    batch_size: 2
-    eval_batch_size: 2
+    batch_size: 32
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -107,7 +107,8 @@ algos:
       use_cache: false
   # DPO, GRPO, GRPO-HF removed due to OOM issues
 model_pairs:
-- phi
+- gemma
+- llama
 datasets:
   AIME:
     train_hf_config: AIME2025-I

@@ -34,9 +34,11 @@ import pita.datasets  # trigger dataset registration
 from pita.plotting.hooks import plot_after_run
 
 
-def evaluate_base_models(cfg: DictConfig, run_root, state_manager: JobStateManager) -> Dict[str, Any]:
+def evaluate_base_models(
+    cfg: DictConfig, run_root, state_manager: JobStateManager
+) -> Dict[str, Any]:
     """Evaluate base reference models on all datasets.
-    
+
     Uses job state tracking for resume capability.
     Returns dict of {family: {dataset: metrics}}.
     """
@@ -45,22 +47,22 @@ def evaluate_base_models(cfg: DictConfig, run_root, state_manager: JobStateManag
     from pita.models.catalog import resolve_family_pair
     from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
     from pita.core.io import ensure_dir, check_base_eval_completed
-    
+
     results_dir = Path(run_root) / "results" / "base_model"
-    
+
     logger.info("=" * 80)
     logger.info("📊 EVALUATING BASE REFERENCE MODEL")
     logger.info("=" * 80)
-    
+
     results: Dict[str, Any] = {}
     model_pairs = list(cfg.model_pairs)
-    
+
     # Collect all unique eval datasets from datasets_by_train
     eval_datasets = set()
     for train_ds in cfg.training.datasets:
         eval_datasets.update(cfg.evaluation.datasets_by_train.get(train_ds, [train_ds]))
     datasets = sorted(eval_datasets)
-    
+
     # Count completed vs pending
     pending_evals = []
     for family in model_pairs:
@@ -71,7 +73,7 @@ def evaluate_base_models(cfg: DictConfig, run_root, state_manager: JobStateManag
                     pending_evals.append((family, dataset, job_id))
                 else:
                     state_manager.update_state(job_id, JobState.EVAL_COMPLETED)
-    
+
     if not pending_evals:
         logger.info("📂 All base model evaluations already completed")
         # Load cached results
@@ -81,36 +83,39 @@ def evaluate_base_models(cfg: DictConfig, run_root, state_manager: JobStateManag
                 result_file = results_dir / family / dataset / "results.json"
                 if result_file.exists():
                     import json
+
                     with open(result_file) as f:
                         results[family][dataset] = json.load(f)
         return results
-    
+
     logger.info(f"📋 {len(pending_evals)} base model evaluations pending")
-    
+
     # Group pending evals by family to minimize model reloading
     from collections import defaultdict
+
     pending_by_family = defaultdict(list)
     for family, dataset, job_id in pending_evals:
         pending_by_family[family].append((dataset, job_id))
-    
+
     for family in model_pairs:
         results[family] = {}
-        
+
         # Load cached results for this family
         for dataset in datasets:
             result_file = results_dir / family / dataset / "results.json"
             if result_file.exists():
                 import json
+
                 with open(result_file) as f:
                     results[family][dataset] = json.load(f)
-        
+
         # Skip if no pending evals for this family
         if family not in pending_by_family:
             continue
-        
+
         ref_alias, _ = resolve_family_pair(family)
         logger.info(f"\n🔧 Loading base model: {family} ({ref_alias})")
-        
+
         gen_cfg = GenerationConfig(
             max_new_tokens=int(cfg.generation.max_new_tokens),
             temperature=float(cfg.generation.temperature),
@@ -121,30 +126,34 @@ def evaluate_base_models(cfg: DictConfig, run_root, state_manager: JobStateManag
             gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
         )
         ref = HFModel(ref_alias, gen_cfg)
-        
+
         for dataset, job_id in pending_by_family[family]:
             save_dir = results_dir / family / dataset
             ensure_dir(save_dir)
-            
+
             logger.info(f"   📊 Evaluating on {dataset}...")
             if dataset in {"TLDR", "IMDBGen"}:
-                metrics = evaluate_avg_reward(cfg, ref, dataset, ref_model=None, save_dir=save_dir)
+                metrics = evaluate_avg_reward(
+                    cfg, ref, dataset, ref_model=None, save_dir=save_dir
+                )
             else:
-                metrics = evaluate_pass1_maj8(cfg, ref, dataset, ref_model=None, save_dir=save_dir)
-            
+                metrics = evaluate_pass1_maj8(
+                    cfg, ref, dataset, ref_model=None, save_dir=save_dir
+                )
+
             # Remove KL for base model (always 0 against itself)
             metrics.pop("avg_kl", None)
             results[family][dataset] = metrics
-            
+
             # Update state
             state_manager.update_state(job_id, JobState.EVAL_COMPLETED)
             logger.info(f"   ✅ {dataset}: {metrics}")
-            
+
             torch.cuda.empty_cache()
-        
+
         del ref
         torch.cuda.empty_cache()
-    
+
     return results
 
 

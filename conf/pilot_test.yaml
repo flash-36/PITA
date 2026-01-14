@@ -44,6 +44,7 @@ algos:
   PITA:
     epochs: 2  # Fewer epochs for faster training
     batch_size: 2
+    eval_batch_size: 2
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -61,6 +62,7 @@ algos:
   QSharp:
     epochs: 2
     batch_size: 2
+    eval_batch_size: 2
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -79,6 +81,7 @@ algos:
     epochs: 2
     proxy_epochs: 2
     batch_size: 2
+    eval_batch_size: 2
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05

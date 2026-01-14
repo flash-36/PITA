@@ -498,6 +498,7 @@ def evaluate_pass1_maj8(
     dataset: str,
     ref_model: Optional[HFModel] = None,
     save_dir: Optional[Path] = None,
+    batch_size: Optional[int] = None,
 ) -> Dict[str, float]:
     with logging_context(stage="EVAL"):
         eval_start = time.time()
@@ -523,7 +524,9 @@ def evaluate_pass1_maj8(
         max_examples = eval_max if eval_max > 0 else data_max
         limit = max_examples if max_examples > 0 else len(ds)
         num_samples = int(cfg.evaluation.num_samples)
-        batch_size = int(cfg.evaluation.batch_size)
+        batch_size = (
+            batch_size if batch_size is not None else int(cfg.evaluation.batch_size)
+        )
         has_verifier = hasattr(ds, "is_correct")
 
         examples = list(islice(ds.iter(), limit))
@@ -605,13 +608,20 @@ def evaluate_pass1_maj8(
 
             # Generate in chunks and checkpoint periodically
             chunk_size = batch_size * num_samples * 10
-            for chunk_start in range(0, len(all_prompts), chunk_size):
+
+            for chunk_idx, chunk_start in enumerate(
+                range(0, len(all_prompts), chunk_size)
+            ):
                 chunk_end = min(chunk_start + chunk_size, len(all_prompts))
                 chunk_prompts = all_prompts[chunk_start:chunk_end]
                 chunk_mapping = prompt_to_example[chunk_start:chunk_end]
+                num_chunks = (len(all_prompts) + chunk_size - 1) // chunk_size
+
+                logger.info(
+                    f"📦 Chunk {chunk_idx+1}/{num_chunks}: generating {len(chunk_prompts)} predictions..."
+                )
 
                 if use_fast_kl:
-                    # Generate with scores for fast KL
                     chunk_preds, chunk_scores = model.continue_from_context_batch(
                         chunk_prompts,
                         model.gen_cfg.max_new_tokens,
@@ -801,6 +811,7 @@ def evaluate_avg_reward(
     dataset: str,
     ref_model: Optional[HFModel] = None,
     save_dir: Optional[Path] = None,
+    batch_size: Optional[int] = None,
 ) -> Dict[str, float]:
     with logging_context(stage="EVAL"):
         # Check if evaluation already completed (results.json exists)
@@ -841,7 +852,9 @@ def evaluate_avg_reward(
         data_max = int(cfg.data_collection.max_examples or 0)
         max_examples = eval_max if eval_max > 0 else data_max
         limit = max_examples if max_examples > 0 else len(ds)
-        batch_size = int(cfg.evaluation.batch_size)
+        batch_size = (
+            batch_size if batch_size is not None else int(cfg.evaluation.batch_size)
+        )
 
         # Collect all examples first
         examples = list(islice(ds.iter(), limit))

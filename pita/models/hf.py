@@ -7,7 +7,6 @@ from typing import Dict, Any, List, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.generation.logits_process import LogitsProcessorList
-from tqdm import tqdm
 from loguru import logger
 
 from pita.models.catalog import resolve_model_id
@@ -283,6 +282,8 @@ class HFModel:
         batch_size: int = 8,
     ) -> List[Dict[str, Any]]:
         """Batch greedy rollout for multiple prompts."""
+        import time
+
         built_prompts = [
             build_instruction_prompt(
                 p,
@@ -298,11 +299,10 @@ class HFModel:
         original_padding_side = self.tokenizer.padding_side
         self.tokenizer.padding_side = "left"
 
-        for i in tqdm(
-            range(0, len(built_prompts), batch_size),
-            total=num_batches,
-            desc="roll_in batches",
-        ):
+        total_tokens_generated = 0
+        start_time = time.time()
+
+        for batch_idx, i in enumerate(range(0, len(built_prompts), batch_size)):
             batch = built_prompts[i : i + batch_size]
             ids = self.tokenizer(batch, return_tensors="pt", padding=True).to(
                 self.model.device
@@ -316,7 +316,9 @@ class HFModel:
             )
             out = self._generate_with_fallback(ids, gen_kwargs)
 
+            batch_tokens = 0
             for j, (seq, prompt_len) in enumerate(zip(out, prompt_lengths)):
+                batch_tokens += len(seq) - prompt_len
                 context_text = self.tokenizer.decode(seq, skip_special_tokens=True)
                 all_results.append(
                     {
@@ -325,6 +327,16 @@ class HFModel:
                         "context_text": context_text,
                     }
                 )
+
+            total_tokens_generated += batch_tokens
+            elapsed = time.time() - start_time
+            tokens_per_sec = total_tokens_generated / max(elapsed, 0.001)
+
+            logger.info(
+                f"  📦 roll_in batch {batch_idx+1}/{num_batches} | "
+                f"{len(all_results)}/{len(built_prompts)} prompts | "
+                f"{tokens_per_sec:.0f} tok/s"
+            )
 
             del out
             if torch.cuda.is_available():
@@ -344,15 +356,17 @@ class HFModel:
         return_scores: bool = False,
     ) -> List[str] | tuple[List[str], List[torch.Tensor]]:
         """Batch continuation from multiple contexts.
-        
+
         Args:
             return_scores: If True, also return the logits/scores at each generation step.
                           This is useful for fast KL computation.
-        
+
         Returns:
             If return_scores=False: List of generated texts
             If return_scores=True: Tuple of (texts, scores) where scores[i] is [seq_len, vocab_size]
         """
+        import time
+
         all_results = []
         all_scores = [] if return_scores else None
         num_batches = (len(contexts) + batch_size - 1) // batch_size
@@ -361,11 +375,10 @@ class HFModel:
         original_padding_side = self.tokenizer.padding_side
         self.tokenizer.padding_side = "left"
 
-        for i in tqdm(
-            range(0, len(contexts), batch_size),
-            total=num_batches,
-            desc=f"continue ({mode}) batches",
-        ):
+        total_tokens_generated = 0
+        start_time = time.time()
+
+        for batch_idx, i in enumerate(range(0, len(contexts), batch_size)):
             batch = contexts[i : i + batch_size]
             ids = self.tokenizer(batch, return_tensors="pt", padding=True).to(
                 self.model.device
@@ -378,46 +391,59 @@ class HFModel:
                 logits_processor=logits_processor,
                 max_new_tokens=max_new_tokens,
             )
-            
+
             if return_scores:
                 gen_kwargs["output_scores"] = True
                 gen_kwargs["return_dict_in_generate"] = True
-            
+
             out = self._generate_with_fallback(ids, gen_kwargs)
 
             if return_scores:
                 sequences = out.sequences
-                # Stack scores: [num_steps, batch_size, vocab_size] -> per-example [num_steps, vocab_size]
                 if out.scores:
-                    stacked_scores = torch.stack(out.scores, dim=0)  # [num_steps, batch_size, vocab_size]
-                    stacked_scores = stacked_scores.transpose(0, 1)  # [batch_size, num_steps, vocab_size]
+                    stacked_scores = torch.stack(out.scores, dim=0)
+                    stacked_scores = stacked_scores.transpose(0, 1)
                 else:
                     stacked_scores = None
             else:
                 sequences = out
 
+            batch_tokens = 0
             for j, (seq, prompt_len) in enumerate(zip(sequences, prompt_lengths)):
                 new_tokens = seq[prompt_len:]
+                batch_tokens += len(new_tokens)
                 text = self.tokenizer.decode(
                     new_tokens, skip_special_tokens=True
                 ).strip()
                 all_results.append(text)
-                
+
                 if return_scores:
                     if stacked_scores is not None:
                         num_new_tokens = len(new_tokens)
                         example_scores = stacked_scores[j, :num_new_tokens, :].cpu()
                         all_scores.append(example_scores)
                     else:
-                        # Append None to maintain alignment with results
                         all_scores.append(None)
+
+            total_tokens_generated += batch_tokens
+            elapsed = time.time() - start_time
+            tokens_per_sec = total_tokens_generated / max(elapsed, 0.001)
+            remaining_batches = num_batches - batch_idx - 1
+            eta_sec = (remaining_batches * batch_tokens) / max(tokens_per_sec, 0.001)
+
+            # Log progress every batch
+            logger.info(
+                f"  📦 {mode} batch {batch_idx+1}/{num_batches} | "
+                f"{len(all_results)}/{len(contexts)} examples | "
+                f"{tokens_per_sec:.0f} tok/s | ETA {eta_sec:.0f}s"
+            )
 
             del out
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
         self.tokenizer.padding_side = original_padding_side
-        
+
         if return_scores:
             return all_results, all_scores
         return all_results

@@ -9,7 +9,7 @@ system:
   attn_impl: eager
   clear_cache_interval: 10
 generation:
-  max_new_tokens: 2048
+  max_new_tokens: 1024
   temperature: 0.8
   top_p: 0.9
   use_chat_template: true
@@ -51,6 +51,7 @@ algos:
   PITA:
     epochs: 10
     batch_size: 32
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -68,6 +69,7 @@ algos:
   QSharp:
     epochs: 10
     batch_size: 32
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -86,6 +88,7 @@ algos:
     epochs: 10
     proxy_epochs: 5
     batch_size: 32
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05

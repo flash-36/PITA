@@ -407,13 +407,24 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
                 except Exception:
                     guided.guidance.eta = float(self.cfg.guidance.eta)
                 save_dir = output_dir / f"eval_{eval_ds}_eta{guided.guidance.eta}"
+                eval_batch = getattr(self.cfg, "eval_batch_size", None)
                 if eval_ds in {"TLDR", "IMDBGen"}:
                     metrics = evaluate_avg_reward(
-                        cfg, guided, eval_ds, ref_model=ref, save_dir=save_dir
+                        cfg,
+                        guided,
+                        eval_ds,
+                        ref_model=ref,
+                        save_dir=save_dir,
+                        batch_size=eval_batch,
                     )
                 else:
                     metrics = evaluate_pass1_maj8(
-                        cfg, guided, eval_ds, ref_model=ref, save_dir=save_dir
+                        cfg,
+                        guided,
+                        eval_ds,
+                        ref_model=ref,
+                        save_dir=save_dir,
+                        batch_size=eval_batch,
                     )
                 by_eta[str(guided.guidance.eta)] = metrics
                 # Clear memory after each evaluation to prevent fragmentation
