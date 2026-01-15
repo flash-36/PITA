@@ -14,21 +14,62 @@ from pita.models.catalog import resolve_model_id
 def _expand_cache_for_candidates(cache: Any, bs: int, top_k: int) -> Any:
     """Expand a KV cache for parallel candidate scoring.
 
-    Handles both:
-    - Legacy tuple format: tuple of (key, value) tuples per layer
-    - Modern Cache objects: DynamicCache with key_cache/value_cache lists
+    Handles:
+    - Legacy tuple format
+    - DynamicCache
+    - HybridCache (Gemma 3)
     """
+    if cache is None:
+        return None
+
+    # Handle HybridCache (Gemma 3) specifically if possible
+    cache_class_name = type(cache).__name__
+    if cache_class_name == "HybridCache":
+        try:
+            from transformers.cache_utils import HybridCache
+            
+            # HybridCache needs the original config to maintain sliding window settings
+            expanded = HybridCache(
+                config=cache.config,
+                batch_size=bs * top_k,
+                max_cache_len=cache.max_cache_len,
+                device=cache.key_cache[0].device if cache.key_cache else None,
+                dtype=cache.key_cache[0].dtype if cache.key_cache else None,
+            )
+            # Copy over the current sequence length metadata
+            if hasattr(cache, "seen_tokens"):
+                expanded.seen_tokens = cache.seen_tokens
+                
+            for layer_idx in range(len(cache.key_cache)):
+                key = cache.key_cache[layer_idx]
+                value = cache.value_cache[layer_idx]
+                if key.numel() == 0:
+                    continue
+                
+                shape = list(key.shape)
+                exp_key = (
+                    key.unsqueeze(1)
+                    .expand(bs, top_k, *shape[1:])
+                    .reshape(bs * top_k, *shape[1:])
+                )
+                exp_value = (
+                    value.unsqueeze(1)
+                    .expand(bs, top_k, *shape[1:])
+                    .reshape(bs * top_k, *shape[1:])
+                )
+                expanded.update(exp_key, exp_value, layer_idx)
+            return expanded
+        except (ImportError, AttributeError, RuntimeError):
+            pass
+
     # Handle legacy tuple format (tuple of tuples)
     if isinstance(cache, tuple):
-        # Try to convert to DynamicCache first if available, as modern models expect it
         try:
             from transformers.cache_utils import DynamicCache
-
             expanded = DynamicCache()
             for layer_idx, layer_kv in enumerate(cache):
                 if isinstance(layer_kv, tuple) and len(layer_kv) == 2:
                     key, value = layer_kv
-                    # key/value shape: [bs, num_heads, seq_len, head_dim]
                     shape = list(key.shape)
                     exp_key = (
                         key.unsqueeze(1)
@@ -42,17 +83,13 @@ def _expand_cache_for_candidates(cache: Any, bs: int, top_k: int) -> Any:
                     )
                     expanded.update(exp_key, exp_value, layer_idx)
                 else:
-                    # Fallback to legacy tuple if structure implies it's not a standard KV pair
-                    # This prevents breaking if the tuple contains something else
                     raise ImportError("Cannot convert to DynamicCache")
             return expanded
         except (ImportError, AttributeError):
-            # Fallback to legacy tuple expansion
             expanded_list = []
             for layer_kv in cache:
                 if isinstance(layer_kv, tuple) and len(layer_kv) == 2:
                     key, value = layer_kv
-                    # key/value shape: [bs, num_heads, seq_len, head_dim]
                     shape = list(key.shape)
                     exp_key = (
                         key.unsqueeze(1)
@@ -70,17 +107,14 @@ def _expand_cache_for_candidates(cache: Any, bs: int, top_k: int) -> Any:
             return tuple(expanded_list)
 
     # Handle modern Cache objects (DynamicCache, etc.)
-    # Try to access the underlying storage
     key_cache = getattr(cache, "key_cache", None) or getattr(cache, "_key_cache", None)
     value_cache = getattr(cache, "value_cache", None) or getattr(
         cache, "_value_cache", None
     )
 
     if key_cache is not None and value_cache is not None:
-        # It's a Cache-like object with key/value lists
         try:
             from transformers.cache_utils import DynamicCache
-
             expanded = DynamicCache()
             for layer_idx in range(len(key_cache)):
                 key = key_cache[layer_idx]
@@ -101,12 +135,10 @@ def _expand_cache_for_candidates(cache: Any, bs: int, top_k: int) -> Any:
         except ImportError:
             pass
 
-    # Fallback: try to convert to legacy and expand
     if hasattr(cache, "to_legacy_cache"):
         legacy = cache.to_legacy_cache()
         return _expand_cache_for_candidates(legacy, bs, top_k)
 
-    # Last resort: return as-is (will likely fail downstream)
     return cache
 
 
@@ -274,10 +306,16 @@ class ValueClassifier(nn.Module):
         del prefix_out
 
         # Determine past_len for position_ids
-        if hasattr(prefix_pkv, "get_seq_length"):
+        if prefix_pkv is None:
+            past_len = 0
+        elif hasattr(prefix_pkv, "get_seq_length"):
             past_len = prefix_pkv.get_seq_length()
         else:
-            past_len = prefix_pkv[0][0].shape[-2]
+            # Fallback for legacy tuple cache [layer][key/value][bs, heads, seq, dim]
+            try:
+                past_len = prefix_pkv[0][0].shape[-2]
+            except (IndexError, TypeError, AttributeError):
+                past_len = seq_len
 
         # Phase 2: Score all candidates in parallel using prefix cache
         expanded_pkv = _expand_cache_for_candidates(prefix_pkv, bs, top_k)
@@ -320,7 +358,11 @@ class ValueClassifier(nn.Module):
                 dim=1,
             )
             # Convert to 4D for SDPA: [batch, 1, 1, kv_len] broadcasts across heads
+            # SDPA expects additive float mask: 0.0 = attend, -inf = don't attend
+            dtype = self.backbone.dtype
             expanded_mask = expanded_mask.view(bs * top_k, 1, 1, past_len + 1)
+            expanded_mask = expanded_mask.to(dtype=dtype)
+            expanded_mask = (1.0 - expanded_mask) * torch.finfo(dtype).min
         else:
             expanded_mask = None
 
