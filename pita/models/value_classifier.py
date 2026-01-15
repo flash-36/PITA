@@ -273,19 +273,41 @@ class ValueClassifier(nn.Module):
         prefix_pkv = prefix_out.past_key_values
         del prefix_out
 
+        # Determine past_len for position_ids
+        if hasattr(prefix_pkv, "get_seq_length"):
+            past_len = prefix_pkv.get_seq_length()
+        else:
+            past_len = prefix_pkv[0][0].shape[-2]
+
         # Phase 2: Score all candidates in parallel using prefix cache
-        # Expand the cache for all candidates
         expanded_pkv = _expand_cache_for_candidates(prefix_pkv, bs, top_k)
 
-        # Expand attention mask and add position for candidate token
-        if attention_mask is not None:
-            mask_len = attention_mask.shape[1]
+        # Candidate tokens as input
+        candidate_ids = logit_indices.reshape(bs * top_k, 1)
+
+        # Explicit position_ids for correct RoPE embeddings
+        candidate_positions = torch.full(
+            (bs * top_k, 1),
+            past_len,
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        # Check if this is a HybridCache (Gemma 3 with sliding window attention)
+        cache_class_name = type(prefix_pkv).__name__
+        is_hybrid_cache = cache_class_name == "HybridCache"
+
+        if is_hybrid_cache:
+            # For HybridCache: don't pass attention_mask, let model compute internally
+            # This avoids mismatch between mask size and sliding window cache size
+            expanded_mask = None
+        elif attention_mask is not None:
+            # For regular caches: use 4D mask for SDPA robustness
             expanded_mask = (
                 attention_mask.unsqueeze(1)
-                .expand(bs, top_k, mask_len)
-                .reshape(bs * top_k, mask_len)
+                .expand(bs, top_k, past_len)
+                .reshape(bs * top_k, past_len)
             )
-            # Add attention for the candidate token
             expanded_mask = torch.cat(
                 [
                     expanded_mask,
@@ -297,16 +319,16 @@ class ValueClassifier(nn.Module):
                 ],
                 dim=1,
             )
+            # Convert to 4D for SDPA: [batch, 1, 1, kv_len] broadcasts across heads
+            expanded_mask = expanded_mask.view(bs * top_k, 1, 1, past_len + 1)
         else:
             expanded_mask = None
 
-        # Candidate tokens as input
-        candidate_ids = logit_indices.reshape(bs * top_k, 1)
-
-        # Run candidates through model
+        # Run candidates through model with explicit positions
         cand_out = self.backbone(
             input_ids=candidate_ids,
             attention_mask=expanded_mask,
+            position_ids=candidate_positions,
             use_cache=False,
             past_key_values=expanded_pkv,
             output_hidden_states=True,
@@ -321,7 +343,6 @@ class ValueClassifier(nn.Module):
         else:
             logits = logits.view(bs, top_k)
 
-        # Return prefix PKV for next step
         return SimpleNamespace(logits=logits, past_key_values=prefix_pkv)
 
     def forward(

@@ -594,16 +594,26 @@ def evaluate_pass1_maj8(
                 all_prompts.append(item["built"])
                 prompt_to_example.append(idx)
 
-        # Track saved scores for fast KL computation
-        saved_scores_map: Dict[int, List[torch.Tensor]] = {}
+        # Track saved scores for fast KL computation (only first sample per example)
+        saved_scores_map: Dict[int, torch.Tensor] = {}
         use_fast_kl = isinstance(model, GuidedHFModel)
+        
+        # Determine which examples need scores for KL (respect kl_sample_ratio)
+        kl_sample_ratio = float(getattr(cfg.evaluation, "kl_sample_ratio", 1.0) or 1.0)
+        n_examples = len(examples)
+        if kl_sample_ratio < 1.0 and n_examples > 0:
+            n_kl_samples = max(1, int(n_examples * kl_sample_ratio))
+            random.seed(42)
+            kl_sample_indices = set(random.sample(range(n_examples), n_kl_samples))
+        else:
+            kl_sample_indices = set(range(n_examples))
 
         if all_prompts:
             logger.info(
                 f"\n🔄 Generating {len(all_prompts)} predictions ({len(completed_indices)} already cached)..."
             )
             if use_fast_kl:
-                logger.info(f"📊 Using fast KL computation with saved scores")
+                logger.info(f"📊 Using fast KL computation (saving scores for {len(kl_sample_indices)} examples)")
             gen_start = time.time()
 
             # Generate in chunks and checkpoint periodically
@@ -621,7 +631,13 @@ def evaluate_pass1_maj8(
                     f"📦 Chunk {chunk_idx+1}/{num_chunks}: generating {len(chunk_prompts)} predictions..."
                 )
 
-                if use_fast_kl:
+                # Only request scores if we have examples in this chunk that need them
+                chunk_needs_scores = use_fast_kl and any(
+                    ex_idx in kl_sample_indices and len(grouped_preds[ex_idx]) == 0
+                    for ex_idx in chunk_mapping
+                )
+                
+                if chunk_needs_scores:
                     chunk_preds, chunk_scores = model.continue_from_context_batch(
                         chunk_prompts,
                         model.gen_cfg.max_new_tokens,
@@ -638,13 +654,15 @@ def evaluate_pass1_maj8(
                     )
                     chunk_scores = [None] * len(chunk_preds)
 
-                # Group predictions and scores
+                # Group predictions; only save scores for first sample of KL-sampled examples
                 for i, (ex_idx, pred) in enumerate(zip(chunk_mapping, chunk_preds)):
+                    is_first_sample = len(grouped_preds[ex_idx]) == 0
                     grouped_preds[ex_idx].append(pred)
-                    if use_fast_kl and chunk_scores[i] is not None:
-                        if ex_idx not in saved_scores_map:
-                            saved_scores_map[ex_idx] = []
-                        saved_scores_map[ex_idx].append(chunk_scores[i])
+                    
+                    # Only save scores for first sample AND only if this example is in KL sample set
+                    if is_first_sample and ex_idx in kl_sample_indices and chunk_scores[i] is not None:
+                        saved_scores_map[ex_idx] = chunk_scores[i]
+                    
                     if len(grouped_preds[ex_idx]) == num_samples:
                         completed_indices.add(ex_idx)
 
@@ -701,8 +719,8 @@ def evaluate_pass1_maj8(
             pass1_conts.append(preds[0])
 
             # Get first sample's scores for KL (if available)
-            if idx in saved_scores_map and saved_scores_map[idx]:
-                pass1_scores.append(saved_scores_map[idx][0])
+            if idx in saved_scores_map:
+                pass1_scores.append(saved_scores_map[idx])
             else:
                 pass1_scores.append(None)
 
@@ -900,24 +918,42 @@ def evaluate_avg_reward(
 
         # PHASE 2: Generate predictions (with checkpointing)
         preds = checkpoint.get("predictions", [])
-        saved_scores: List[Optional[torch.Tensor]] = [None] * len(preds)  # For fast KL
+        saved_scores: List[Optional[torch.Tensor]] = [None] * len(preds)
         use_fast_kl = isinstance(model, GuidedHFModel)
+        
+        # Determine which examples need scores for KL (respect kl_sample_ratio)
+        kl_sample_ratio = float(getattr(cfg.evaluation, "kl_sample_ratio", 1.0) or 1.0)
+        n_examples = len(prompts_data)
+        if kl_sample_ratio < 1.0 and n_examples > 0:
+            n_kl_samples = max(1, int(n_examples * kl_sample_ratio))
+            random.seed(42)
+            kl_sample_indices = set(random.sample(range(n_examples), n_kl_samples))
+        else:
+            kl_sample_indices = set(range(n_examples))
 
         if len(preds) < len(prompts_data):
             remaining_prompts = [item["built"] for item in prompts_data[len(preds) :]]
+            start_idx = len(preds)
             logger.info(
                 f"🔄 Generating {len(remaining_prompts)} predictions ({len(preds)} already cached)..."
             )
             if use_fast_kl:
-                logger.info(f"📊 Using fast KL computation with saved scores")
+                logger.info(f"📊 Using fast KL computation (saving scores for {len(kl_sample_indices)} examples)")
 
             # Generate in chunks and checkpoint
             chunk_size = batch_size * 20
             for chunk_start in range(0, len(remaining_prompts), chunk_size):
                 chunk_end = min(chunk_start + chunk_size, len(remaining_prompts))
                 chunk_prompts = remaining_prompts[chunk_start:chunk_end]
+                global_start = start_idx + chunk_start
+                
+                # Check if any example in this chunk needs scores for KL
+                chunk_needs_scores = use_fast_kl and any(
+                    (global_start + i) in kl_sample_indices 
+                    for i in range(len(chunk_prompts))
+                )
 
-                if use_fast_kl:
+                if chunk_needs_scores:
                     chunk_preds, chunk_scores = model.continue_from_context_batch(
                         chunk_prompts,
                         model.gen_cfg.max_new_tokens,
@@ -926,7 +962,12 @@ def evaluate_avg_reward(
                         return_scores=True,
                     )
                     preds.extend(chunk_preds)
-                    saved_scores.extend(chunk_scores)
+                    # Only save scores for KL-sampled examples
+                    for i, score in enumerate(chunk_scores):
+                        if (global_start + i) in kl_sample_indices:
+                            saved_scores.append(score)
+                        else:
+                            saved_scores.append(None)
                 else:
                     chunk_preds = model.continue_from_context_batch(
                         chunk_prompts,
