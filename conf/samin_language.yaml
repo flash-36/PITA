@@ -1,5 +1,5 @@
 experiment:
-  name: gemma_llama_trial
+  name: gemma_llama_language_trial
   seed: 42
 rounds_of_training: 1
 resume_from: null
@@ -17,7 +17,8 @@ training:
   micro_batch_size: 4
   gradient_checkpointing: true
   datasets:
-  - GSM8K
+  - IMDBGen
+  - TLDR
 data_collection:
   samples_per_example: 4
   seed: 42

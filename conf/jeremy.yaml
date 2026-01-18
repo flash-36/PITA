@@ -9,7 +9,7 @@ system:
   attn_impl: sdpa
   clear_cache_interval: 10
 generation:
-  max_new_tokens: 1024
+  max_new_tokens: 512
   temperature: 0.8
   top_p: 0.9
   use_chat_template: true
@@ -23,7 +23,7 @@ data_collection:
   seed: 42
   max_examples: 2500
   reward_batch_size: 64
-  chunk_size: 128
+  chunk_size: 8
   bradley_terry_sampling: true
   bradley_terry_beta: 1.0
 evaluation:
@@ -51,7 +51,7 @@ algos:
   PITA:
     epochs: 10
     batch_size: 2
-    eval_batch_size: 2
+    eval_batch_size: 4
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -69,7 +69,7 @@ algos:
   QSharp:
     epochs: 10
     batch_size: 2
-    eval_batch_size: 2
+    eval_batch_size: 4
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -88,7 +88,7 @@ algos:
     epochs: 10
     proxy_epochs: 5
     batch_size: 2
-    eval_batch_size: 2
+    eval_batch_size: 4
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05

@@ -137,61 +137,67 @@ class ParallelJobExecutor:
         job_queue = mp_context.Queue()
         result_queue = mp_context.Queue()
 
-        # Fill job queue
-        for job in jobs:
-            job_queue.put(job)
+        try:
+            # Fill job queue
+            for job in jobs:
+                job_queue.put(job)
 
-        # Add sentinel values to signal workers to stop
-        for _ in range(self.max_concurrent):
-            job_queue.put(None)
+            # Add sentinel values to signal workers to stop
+            for _ in range(self.max_concurrent):
+                job_queue.put(None)
 
-        # Start worker processes
-        workers = []
-        for worker_id in range(self.max_concurrent):
-            gpu_id = self.gpu_manager.available_gpus[
-                worker_id % self.gpu_manager.num_gpus
-            ]
+            # Start worker processes
+            workers = []
+            for worker_id in range(self.max_concurrent):
+                gpu_id = self.gpu_manager.available_gpus[
+                    worker_id % self.gpu_manager.num_gpus
+                ]
 
-            p = mp_context.Process(
-                target=self._worker_loop,
-                args=(
-                    worker_id,
-                    gpu_id,
-                    job_queue,
-                    result_queue,
-                    job_executor,
-                    executor_args,
-                ),
-            )
-            p.start()
-            workers.append(p)
+                p = mp_context.Process(
+                    target=self._worker_loop,
+                    args=(
+                        worker_id,
+                        gpu_id,
+                        job_queue,
+                        result_queue,
+                        job_executor,
+                        executor_args,
+                    ),
+                )
+                p.start()
+                workers.append(p)
 
-        # Collect results
-        results = []
-        completed = 0
-        total = len(jobs)
+            # Collect results
+            results = []
+            completed = 0
+            total = len(jobs)
 
-        from tqdm import tqdm
+            from tqdm import tqdm
 
-        with tqdm(total=total, desc="Training jobs") as pbar:
-            while completed < total:
-                try:
-                    result = result_queue.get(timeout=1)
-                    results.append(result)
-                    completed += 1
-                    pbar.update(1)
+            with tqdm(total=total, desc="Training jobs") as pbar:
+                while completed < total:
+                    try:
+                        result = result_queue.get(timeout=1)
+                        results.append(result)
+                        completed += 1
+                        pbar.update(1)
 
-                    if result.success:
-                        logger.info(f"✓ Completed: {result.job}")
-                    else:
-                        logger.error(f"✗ Failed: {result.job} - {result.error}")
+                        if result.success:
+                            logger.info(f"✓ Completed: {result.job}")
+                        else:
+                            logger.error(f"✗ Failed: {result.job} - {result.error}")
 
-                except Empty:
-                    continue
+                    except Empty:
+                        continue
 
-        # Wait for all workers to finish
-        for p in workers:
-            p.join()
+            # Wait for all workers to finish
+            for p in workers:
+                p.join()
+        finally:
+            job_queue.close()
+            result_queue.close()
+            job_queue.join_thread()
+            result_queue.join_thread()
 
         return results
 
@@ -307,20 +313,20 @@ class ParallelJobExecutor:
         state_manager: Optional[JobStateManager] = None,
     ) -> List[JobResult]:
         """Execute jobs in parallel with priority-based scheduling.
-        
+
         Jobs closer to completion get higher priority so eval results come faster.
-        
+
         Priority order (highest to lowest):
         1. MODEL_TRAINED (just needs eval)
         2. DATA_GENERATED (needs training + eval)
         3. NOT_STARTED (needs data gen + training + eval)
-        
+
         Args:
             jobs: List of jobs to execute
             job_executor: Function that executes a single job
             executor_args: Arguments to pass to job executor
             state_manager: Job state manager for priority calculation
-            
+
         Returns:
             List of job results
         """
@@ -335,99 +341,109 @@ class ParallelJobExecutor:
         mp_context = mp.get_context("spawn")
 
         # Create priority job queue and result queue
-        job_queue = mp_context.Manager().Queue()
-        result_queue = mp_context.Queue()
+        with mp_context.Manager() as manager:
+            job_queue = manager.Queue()
+            result_queue = mp_context.Queue()
 
-        # Calculate priorities and add jobs to queue
-        def get_job_priority(job: TrainingJob) -> int:
-            """Calculate priority for a job (higher = more urgent)."""
-            if state_manager is None:
-                base_priority = 0
-            else:
-                state = state_manager.get_state(job.job_id)
-                if state == JobState.EVAL_COMPLETED:
-                    return 1000  # Already done, will be skipped
-                elif state == JobState.MODEL_TRAINED:
-                    base_priority = 900  # Just needs eval
-                elif state == JobState.DATA_GENERATED:
-                    base_priority = 500  # Needs training + eval
+            # Calculate priorities and add jobs to queue
+            def get_job_priority(job: TrainingJob) -> int:
+                """Calculate priority for a job (higher = more urgent)."""
+                if state_manager is None:
+                    base_priority = 0
                 else:
-                    base_priority = 100  # Needs everything
-            
-            # Within same state, prioritize earlier rounds
-            round_priority = -job.round_idx * 10
-            
-            return base_priority + round_priority
-
-        # Sort jobs by priority (highest first)
-        prioritized_jobs = sorted(jobs, key=get_job_priority, reverse=True)
-        
-        logger.info("📊 Job priority breakdown:")
-        priority_counts = {}
-        for job in prioritized_jobs:
-            priority = get_job_priority(job)
-            stage = "COMPLETED" if priority >= 1000 else \
-                    "MODEL_TRAINED" if priority >= 900 else \
-                    "DATA_GENERATED" if priority >= 500 else "NOT_STARTED"
-            priority_counts[stage] = priority_counts.get(stage, 0) + 1
-        for stage, count in sorted(priority_counts.items()):
-            logger.info(f"  {stage}: {count} jobs")
-
-        # Fill job queue with prioritized jobs
-        for job in prioritized_jobs:
-            job_queue.put(job)
-
-        # Add sentinel values to signal workers to stop
-        for _ in range(self.max_concurrent):
-            job_queue.put(None)
-
-        # Start worker processes
-        workers = []
-        for worker_id in range(self.max_concurrent):
-            gpu_id = self.gpu_manager.available_gpus[
-                worker_id % self.gpu_manager.num_gpus
-            ]
-
-            p = mp_context.Process(
-                target=self._worker_loop,
-                args=(
-                    worker_id,
-                    gpu_id,
-                    job_queue,
-                    result_queue,
-                    job_executor,
-                    executor_args,
-                ),
-            )
-            p.start()
-            workers.append(p)
-
-        # Collect results
-        results = []
-        completed = 0
-        total = len(jobs)
-
-        from tqdm import tqdm
-
-        with tqdm(total=total, desc="⚙️  Jobs", unit="job") as pbar:
-            while completed < total:
-                try:
-                    result = result_queue.get(timeout=1)
-                    results.append(result)
-                    completed += 1
-                    pbar.update(1)
-
-                    if result.success:
-                        logger.info(f"✅ Completed: {result.job}")
+                    state = state_manager.get_state(job.job_id)
+                    if state == JobState.EVAL_COMPLETED:
+                        return 1000  # Already done, will be skipped
+                    elif state == JobState.MODEL_TRAINED:
+                        base_priority = 900  # Just needs eval
+                    elif state == JobState.DATA_GENERATED:
+                        base_priority = 500  # Needs training + eval
                     else:
-                        logger.error(f"❌ Failed: {result.job} - {result.error}")
+                        base_priority = 100  # Needs everything
 
-                except Empty:
-                    continue
+                # Within same state, prioritize earlier rounds
+                round_priority = -job.round_idx * 10
 
-        # Wait for all workers to finish
-        for p in workers:
-            p.join()
+                return base_priority + round_priority
+
+            # Sort jobs by priority (highest first)
+            prioritized_jobs = sorted(jobs, key=get_job_priority, reverse=True)
+
+            logger.info("📊 Job priority breakdown:")
+            priority_counts = {}
+            for job in prioritized_jobs:
+                priority = get_job_priority(job)
+                stage = (
+                    "COMPLETED"
+                    if priority >= 1000
+                    else (
+                        "MODEL_TRAINED"
+                        if priority >= 900
+                        else "DATA_GENERATED" if priority >= 500 else "NOT_STARTED"
+                    )
+                )
+                priority_counts[stage] = priority_counts.get(stage, 0) + 1
+            for stage, count in sorted(priority_counts.items()):
+                logger.info(f"  {stage}: {count} jobs")
+
+            # Fill job queue with prioritized jobs
+            for job in prioritized_jobs:
+                job_queue.put(job)
+
+            # Add sentinel values to signal workers to stop
+            for _ in range(self.max_concurrent):
+                job_queue.put(None)
+
+            # Start worker processes
+            workers = []
+            for worker_id in range(self.max_concurrent):
+                gpu_id = self.gpu_manager.available_gpus[
+                    worker_id % self.gpu_manager.num_gpus
+                ]
+
+                p = mp_context.Process(
+                    target=self._worker_loop,
+                    args=(
+                        worker_id,
+                        gpu_id,
+                        job_queue,
+                        result_queue,
+                        job_executor,
+                        executor_args,
+                    ),
+                )
+                p.start()
+                workers.append(p)
+
+            # Collect results
+            results = []
+            completed = 0
+            total = len(jobs)
+
+            from tqdm import tqdm
+
+            with tqdm(total=total, desc="⚙️  Jobs", unit="job") as pbar:
+                while completed < total:
+                    try:
+                        result = result_queue.get(timeout=1)
+                        results.append(result)
+                        completed += 1
+                        pbar.update(1)
+
+                        if result.success:
+                            logger.info(f"✅ Completed: {result.job}")
+                        else:
+                            logger.error(f"❌ Failed: {result.job} - {result.error}")
+
+                    except Empty:
+                        continue
+
+            # Wait for all workers to finish
+            for p in workers:
+                p.join()
+
+            result_queue.close()
+            result_queue.join_thread()
 
         logger.info(f"🎉 All jobs complete!")
         return results
