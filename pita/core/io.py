@@ -157,6 +157,16 @@ def check_base_eval_completed(
     return result_path.exists()
 
 
+def check_base_eval_cot8_completed(
+    family: str,
+    dataset: str,
+    run_root: Path,
+) -> bool:
+    """Check if base model 8-shot CoT evaluation is complete."""
+    result_path = run_root / "results" / "base_model_cot8" / str(family) / dataset / "results.json"
+    return result_path.exists()
+
+
 def mark_phase_complete(
     phase_name: str,
     algo_key: str,

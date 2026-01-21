@@ -157,6 +157,123 @@ def evaluate_base_models(
     return results
 
 
+def evaluate_base_models_cot8(
+    cfg: DictConfig, run_root, state_manager: JobStateManager
+) -> Dict[str, Any]:
+    """Evaluate base reference models on GSM8K using 8-shot CoT.
+
+    Uses job state tracking for resume capability.
+    Returns dict of {family: {dataset: metrics}}.
+    """
+    from pathlib import Path
+    from pita.models.hf import HFModel, GenerationConfig
+    from pita.models.catalog import resolve_family_pair
+    from pita.eval.evaluate_parallel import evaluate_parallel
+    from pita.core.io import ensure_dir, check_base_eval_cot8_completed
+
+    results_dir = Path(run_root) / "results" / "base_model_cot8"
+
+    logger.info("=" * 80)
+    logger.info("📊 EVALUATING BASE MODEL (8-SHOT COT)")
+    logger.info("=" * 80)
+
+    results: Dict[str, Any] = {}
+    model_pairs = list(cfg.model_pairs)
+
+    # Collect all unique eval datasets from datasets_by_train that are reasoning datasets
+    eval_datasets = set()
+    for train_ds in cfg.training.datasets:
+        eval_datasets.update(cfg.evaluation.datasets_by_train.get(train_ds, [train_ds]))
+    datasets = sorted([ds for ds in eval_datasets if ds in {"GSM8K", "MATH", "AIME"}])
+
+    # Count completed vs pending
+    pending_evals = []
+    for family in model_pairs:
+        for dataset in datasets:
+            job_id = f"base_model_cot8_{family}_{dataset}"
+            if state_manager.get_state(job_id) != JobState.EVAL_COMPLETED:
+                if not check_base_eval_cot8_completed(family, dataset, Path(run_root)):
+                    pending_evals.append((family, dataset, job_id))
+                else:
+                    state_manager.update_state(job_id, JobState.EVAL_COMPLETED)
+
+    if not pending_evals:
+        logger.info("📂 All base model CoT8 evaluations already completed")
+        # Load cached results
+        for family in model_pairs:
+            results[family] = {}
+            for dataset in datasets:
+                result_file = results_dir / family / dataset / "results.json"
+                if result_file.exists():
+                    import json
+
+                    with open(result_file) as f:
+                        results[family][dataset] = json.load(f)
+        return results
+
+    logger.info(f"📋 {len(pending_evals)} base model CoT8 evaluations pending")
+
+    # Group pending evals by family to minimize model reloading
+    from collections import defaultdict
+
+    pending_by_family = defaultdict(list)
+    for family, dataset, job_id in pending_evals:
+        pending_by_family[family].append((dataset, job_id))
+
+    for family in model_pairs:
+        results[family] = {}
+
+        # Load cached results for this family
+        for dataset in datasets:
+            result_file = results_dir / family / dataset / "results.json"
+            if result_file.exists():
+                import json
+
+                with open(result_file) as f:
+                    results[family][dataset] = json.load(f)
+
+        if family not in pending_by_family:
+            continue
+
+        ref_alias, _ = resolve_family_pair(family)
+        logger.info(f"\n🔧 Loading base model for CoT8: {family} ({ref_alias})")
+
+        gen_cfg = GenerationConfig(
+            max_new_tokens=int(cfg.generation.max_new_tokens),
+            temperature=float(cfg.generation.temperature),
+            top_p=float(cfg.generation.top_p),
+            use_chat_template=bool(cfg.generation.use_chat_template),
+            dtype=str(cfg.system.dtype),
+            attn_impl=str(cfg.system.attn_impl),
+            gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
+        )
+        ref = HFModel(ref_alias, gen_cfg)
+
+        for dataset, job_id in pending_by_family[family]:
+            save_dir = results_dir / family / dataset
+            ensure_dir(save_dir)
+
+            logger.info(f"   📊 Evaluating on {dataset} (8-shot CoT)...")
+            metrics = evaluate_parallel(
+                cfg, ref, dataset, ref_model=None, save_dir=save_dir, is_cot8=True
+            )
+
+            # Remove KL for base model (always 0 against itself)
+            metrics.pop("avg_kl", None)
+            results[family][dataset] = metrics
+
+            # Update state
+            state_manager.update_state(job_id, JobState.EVAL_COMPLETED)
+            logger.info(f"   ✅ {dataset} (CoT8): {metrics}")
+
+            torch.cuda.empty_cache()
+
+        del ref
+        torch.cuda.empty_cache()
+
+    return results
+
+
 def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResult:
     """Execute a single training job.
 
@@ -570,6 +687,11 @@ def main(cfg: DictConfig) -> None:
     # Evaluate base models (after algorithm jobs, so it doesn't block parallel execution)
     base_model_results = evaluate_base_models(cfg, run_root, state_manager)
     logger.info(f"📊 Base model evaluation complete")
+
+    # Evaluate 8-shot CoT base model (for reasoning datasets)
+    if any(ds in {"GSM8K", "MATH", "AIME"} for ds in cfg.training.datasets):
+        cot8_results = evaluate_base_models_cot8(cfg, run_root, state_manager)
+        logger.info(f"📊 8-shot CoT base model evaluation complete")
 
     # Generate plots
     figs_dir = create_subdir(run_root, ["figures"])

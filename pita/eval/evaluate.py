@@ -499,6 +499,7 @@ def evaluate_pass1_maj8(
     ref_model: Optional[HFModel] = None,
     save_dir: Optional[Path] = None,
     batch_size: Optional[int] = None,
+    is_cot8: bool = False,
 ) -> Dict[str, float]:
     with logging_context(stage="EVAL"):
         eval_start = time.time()
@@ -518,6 +519,8 @@ def evaluate_pass1_maj8(
         if ds is None:
             return {}
 
+        from pita.eval.cot_examples import get_8shot_prompt
+
         # Use evaluation.max_examples if set, otherwise fall back to data_collection.max_examples
         eval_max = int(getattr(cfg.evaluation, "max_examples", 0) or 0)
         data_max = int(cfg.data_collection.max_examples or 0)
@@ -536,7 +539,11 @@ def evaluate_pass1_maj8(
 
         prompts_data = []
         for ex in examples:
-            prompt = ds.hydrate_prompt(ex.question)
+            if is_cot8:
+                prompt = get_8shot_prompt(dataset, ex.question)
+            else:
+                prompt = ds.hydrate_prompt(ex.question)
+            
             built = build_instruction_prompt(
                 prompt,
                 tokenizer=model.tokenizer,

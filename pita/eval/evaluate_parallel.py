@@ -128,7 +128,6 @@ def _compute_traj_kl_batched(
     from tqdm import tqdm
 
     # Check if guided model to decide on progress bar strategy
-    from pita.models.guided import GuidedHFModel
     is_guided_model = isinstance(policy, GuidedHFModel)
     
     outer_pbar = tqdm(
@@ -252,6 +251,7 @@ def evaluate_pass1_maj8_batched(
     ref_model: Optional[HFModel] = None,
     save_dir: Optional[Path] = None,
     batch_size: int = 8,
+    is_cot8: bool = False,
 ) -> Dict[str, float]:
     """Evaluate pass@1 and maj@8 with batched generation.
 
@@ -262,10 +262,13 @@ def evaluate_pass1_maj8_batched(
         ref_model: Reference model for KL computation
         save_dir: Directory to save results
         batch_size: Batch size for generation (number of examples to process at once)
+        is_cot8: Whether to use 8-shot CoT prompting
     """
     ds = build_test_dataset(cfg, dataset)
     if ds is None:
         return {}
+
+    from pita.eval.cot_examples import get_8shot_prompt
 
     max_examples = int(cfg.data_collection.max_examples or 0)
     limit = max_examples if max_examples > 0 else len(ds)
@@ -281,7 +284,11 @@ def evaluate_pass1_maj8_batched(
 
     prompts_data = []
     for ex in tqdm(examples, desc="🔧 Preparing prompts", unit="ex"):
-        prompt = ds.hydrate_prompt(ex.question)
+        if is_cot8:
+            prompt = get_8shot_prompt(dataset, ex.question)
+        else:
+            prompt = ds.hydrate_prompt(ex.question)
+        
         built = build_instruction_prompt(
             prompt,
             tokenizer=model.tokenizer,
@@ -306,7 +313,6 @@ def evaluate_pass1_maj8_batched(
         grouped_preds[ex_idx].append(pred)
 
     logger.info("\n📊 Computing metrics and KL divergence...")
-    from pita.models.guided import GuidedHFModel
     import time
     if isinstance(model, GuidedHFModel):
         logger.info("⚠️  KL computation for guided models processes tokens step-by-step - this may take several minutes")
@@ -356,18 +362,27 @@ def evaluate_pass1_maj8_batched(
     kl_elapsed = time.time() - kl_start
     logger.info(f"✅ KL computation complete ({kl_elapsed:.1f}s)")
 
+    results = {
+        "pass@1": float(pass1 / max(1, total)),
+        "maj@8": float(maj8 / max(1, total)),
+        "avg_kl": float(sum_kl / max(1, total)),
+        "num_examples": int(total),
+    }
+
     if save_dir is not None:
         ensure_dir(Path(save_dir))
         ds_out = Dataset.from_list(rows)
         ds_out.save_to_disk(str(Path(save_dir) / "eval_predictions.hf"))
         ds_out.to_csv(str(Path(save_dir) / "eval_predictions.csv"))
 
-    return {
-        "pass@1": float(pass1 / max(1, total)),
-        "maj@8": float(maj8 / max(1, total)),
-        "avg_kl": float(sum_kl / max(1, total)),
-        "num_examples": int(total),
-    }
+        # Save results to JSON for caching
+        import json
+        results_json = Path(save_dir) / "results.json"
+        with open(results_json, "w") as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"💾 Saved results to {results_json}")
+
+    return results
 
 
 def evaluate_avg_reward_batched(
@@ -468,18 +483,27 @@ def evaluate_avg_reward_batched(
             }
         )
 
+    avg_reward = float(sum_reward / max(1, total))
+    results = {
+        "avg_reward": avg_reward,
+        "avg_kl": float(sum_kl / max(1, total)),
+        "num_examples": int(total),
+    }
+
     if save_dir is not None:
         ensure_dir(Path(save_dir))
         ds_out = Dataset.from_list(rows)
         ds_out.save_to_disk(str(Path(save_dir) / "eval_predictions.hf"))
         ds_out.to_csv(str(Path(save_dir) / "eval_predictions.csv"))
 
-    avg_reward = float(sum_reward / max(1, total))
-    return {
-        "avg_reward": avg_reward,
-        "avg_kl": float(sum_kl / max(1, total)),
-        "num_examples": int(total),
-    }
+        # Save results to JSON for caching
+        import json
+        results_json = Path(save_dir) / "results.json"
+        with open(results_json, "w") as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"💾 Saved results to {results_json}")
+
+    return results
 
 
 def evaluate_parallel(
@@ -489,6 +513,7 @@ def evaluate_parallel(
     ref_model: Optional[HFModel] = None,
     save_dir: Optional[Path] = None,
     use_reward: bool = False,
+    is_cot8: bool = False,
 ) -> Dict[str, float]:
     """Automatically select evaluation method based on GPU availability.
 
@@ -499,10 +524,11 @@ def evaluate_parallel(
     logger.info(f"Using batch size {batch_size} for evaluation on {dataset}")
 
     if use_reward:
+        # Reward-based evaluation doesn't support CoT currently (as discussed)
         return evaluate_avg_reward_batched(
             cfg, model, dataset, ref_model, save_dir, batch_size
         )
     else:
         return evaluate_pass1_maj8_batched(
-            cfg, model, dataset, ref_model, save_dir, batch_size
+            cfg, model, dataset, ref_model, save_dir, batch_size, is_cot8=is_cot8
         )
