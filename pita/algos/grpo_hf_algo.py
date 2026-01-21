@@ -68,8 +68,8 @@ class GRPOHFAlgorithm(PostTrainingAlgorithms):
 
         samples_per_prompt = int(self.cfg.samples_per_prompt)
         batch_size = int(cfg.algos[self.algo_key].batch_size)
-        max_examples = int(cfg.data_collection.max_examples or 0)
-        limit = max_examples if max_examples > 0 else len(ds)
+        limit = int(getattr(cfg.datasets[dataset], "train_size_cap", 0) or 0)
+        limit = limit if limit > 0 else len(ds)
 
         # Collect all examples first
         examples = []

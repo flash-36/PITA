@@ -1,5 +1,5 @@
 experiment:
-  name: gemma_language_trial
+  name: Pilot_Check_Full
   seed: 42
 rounds_of_training: 1
 resume_from: null
@@ -9,7 +9,7 @@ system:
   attn_impl: sdpa
   clear_cache_interval: 10
 generation:
-  max_new_tokens: 1024
+  max_new_tokens: 128
   temperature: 0.8
   top_p: 0.9
   use_chat_template: true
@@ -17,26 +17,22 @@ training:
   micro_batch_size: 4
   gradient_checkpointing: true
   datasets:
+  - GSM8K
   - IMDBGen
   - TLDR
 data_collection:
-  samples_per_example: 4
+  samples_per_example: 2
   seed: 42
-  max_examples: 2500
   reward_batch_size: 64
-  chunk_size: 128
+  chunk_size: 32
   bradley_terry_sampling: true
   bradley_terry_beta: 1.0
 evaluation:
   etas:
-  - 0.25
-  - 0.5
   - 1.0
-  - 4.0
-  num_samples: 8
-  batch_size: 32
-  max_examples: 250
-  kl_sample_ratio: 0.1  # 10% of examples for approximate KL
+  num_samples: 2
+  batch_size: 4
+  kl_sample_ratio: 0.5
   datasets_by_train:
     GSM8K:
     - GSM8K
@@ -50,11 +46,11 @@ parallel_generation: false
 use_parallel_execution: true
 algos:
   PITA:
-    epochs: 10
-    batch_size: 32
-    eval_batch_size: 32
+    epochs: 1
+    batch_size: 2
+    eval_batch_size: 4
     max_batch_num_tokens: 16384
-    num_workers: 4
+    num_workers: 1
     lr: 2.0e-05
     weight_decay: 0.0
     grad_clip: 1.0
@@ -68,11 +64,11 @@ algos:
       top_k: 20
       use_cache: true
   QSharp:
-    epochs: 10
-    batch_size: 32
-    eval_batch_size: 32
+    epochs: 1
+    batch_size: 2
+    eval_batch_size: 4
     max_batch_num_tokens: 16384
-    num_workers: 4
+    num_workers: 1
     lr: 2.0e-05
     weight_decay: 0.0
     grad_clip: 1.0
@@ -86,17 +82,14 @@ algos:
       top_k: 20
       use_cache: true
   QSharp-HF:
-    epochs: 10
-    proxy_epochs: 5
-    batch_size: 32
-    eval_batch_size: 32
+    epochs: 1
+    batch_size: 2
+    eval_batch_size: 4
     max_batch_num_tokens: 16384
-    num_workers: 4
+    num_workers: 1
     lr: 2.0e-05
-    proxy_lr: 2.0e-05
     weight_decay: 0.0
     grad_clip: 1.0
-    proxy_loss_type: bradley_terry
     loss_type: mle
     num_atoms: 11
     V_min: 0.0
@@ -106,11 +99,14 @@ algos:
       mode: expectation
       top_k: 20
       use_cache: true
-  # DPO, GRPO, GRPO-HF removed due to OOM issues
 model_pairs:
 - gemma
+- llama
+- phi
 datasets:
   AIME:
+    train_size_cap: 2
+    test_size_cap: 2
     train_hf_config: AIME2025-I
     train_split: test
     question_key: question
@@ -119,6 +115,8 @@ datasets:
     test_hf_config: AIME2025-I
     test_split: test
   GSM8K:
+    train_size_cap: 2
+    test_size_cap: 2
     train_hf_config: main
     train_split: train
     question_key: question
@@ -127,6 +125,8 @@ datasets:
     test_hf_config: main
     test_split: test
   TLDR:
+    train_size_cap: 2
+    test_size_cap: 2
     train_hf_config: ''
     train_split: train
     question_key: prompt
@@ -135,6 +135,8 @@ datasets:
     test_hf_config: ''
     test_split: test
   IMDBGen:
+    train_size_cap: 2
+    test_size_cap: 2
     train_hf_config: ''
     train_split: train
     question_key: text
@@ -143,6 +145,8 @@ datasets:
     test_hf_config: ''
     test_split: test
   MATH:
+    train_size_cap: 2
+    test_size_cap: 2
     train_hf_config: ''
     train_split: test
     question_key: problem

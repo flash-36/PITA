@@ -31,7 +31,6 @@ from pita.core.gpu_manager import get_gpu_manager
 from pita.core.logging_context import setup_context_logging
 import pita.algos  # trigger registration imports
 import pita.datasets  # trigger dataset registration
-from pita.plotting.hooks import plot_after_run
 
 
 def evaluate_base_models(
@@ -689,19 +688,22 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"📊 Base model evaluation complete")
 
     # Evaluate 8-shot CoT base model (for reasoning datasets)
+    cot8_results = {}
     if any(ds in {"GSM8K", "MATH", "AIME"} for ds in cfg.training.datasets):
         cot8_results = evaluate_base_models_cot8(cfg, run_root, state_manager)
         logger.info(f"📊 8-shot CoT base model evaluation complete")
 
-    # Generate plots
-    figs_dir = create_subdir(run_root, ["figures"])
-    try:
-        plot_after_run(cfg=cfg, results=all_results, output_dir=figs_dir)
-    except Exception as e:
-        logger.warning(f"Failed to generate plots: {e}")
+    # Save aggregated results to a central JSON for easy access
+    final_payload = {
+        "training_results": all_results,
+        "base_model_results": base_model_results,
+        "base_model_cot8_results": cot8_results,
+        "config": OmegaConf.to_container(cfg, resolve=True),
+    }
+    save_json(run_root / "final_results.json", final_payload)
 
     # Final summary
-    logger.info("✅ All batches complete!")
+    logger.info("✅ All jobs complete!")
     logger.info(f"📊 Final summary: Check {run_root} for results")
 
     gpu_manager.print_memory_summary()

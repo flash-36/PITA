@@ -1,5 +1,5 @@
 experiment:
-  name: gemma_llama_trial
+  name: Gemma_Llama_Experiment
   seed: 42
 rounds_of_training: 1
 resume_from: null
@@ -18,10 +18,11 @@ training:
   gradient_checkpointing: true
   datasets:
   - GSM8K
+  - IMDBGen
+  - TLDR
 data_collection:
   samples_per_example: 4
   seed: 42
-  max_examples: 2500
   reward_batch_size: 64
   chunk_size: 128
   bradley_terry_sampling: true
@@ -34,7 +35,6 @@ evaluation:
   - 4.0
   num_samples: 8
   batch_size: 32
-  max_examples: 250
   kl_sample_ratio: 0.1  # 10% of examples for approximate KL
   datasets_by_train:
     GSM8K:
@@ -86,16 +86,13 @@ algos:
       use_cache: true
   QSharp-HF:
     epochs: 10
-    proxy_epochs: 5
     batch_size: 32
     eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
-    proxy_lr: 2.0e-05
     weight_decay: 0.0
     grad_clip: 1.0
-    proxy_loss_type: bradley_terry
     loss_type: mle
     num_atoms: 11
     V_min: 0.0
@@ -105,12 +102,13 @@ algos:
       mode: expectation
       top_k: 20
       use_cache: true
-  # DPO, GRPO, GRPO-HF removed due to OOM issues
 model_pairs:
 - gemma
 - llama
 datasets:
   AIME:
+    train_size_cap: 0
+    test_size_cap: 0
     train_hf_config: AIME2025-I
     train_split: test
     question_key: question
@@ -119,6 +117,8 @@ datasets:
     test_hf_config: AIME2025-I
     test_split: test
   GSM8K:
+    train_size_cap: 0
+    test_size_cap: 0
     train_hf_config: main
     train_split: train
     question_key: question
@@ -127,6 +127,8 @@ datasets:
     test_hf_config: main
     test_split: test
   TLDR:
+    train_size_cap: 0
+    test_size_cap: 0
     train_hf_config: ''
     train_split: train
     question_key: prompt
@@ -135,6 +137,8 @@ datasets:
     test_hf_config: ''
     test_split: test
   IMDBGen:
+    train_size_cap: 0
+    test_size_cap: 5000
     train_hf_config: ''
     train_split: train
     question_key: text
@@ -143,6 +147,8 @@ datasets:
     test_hf_config: ''
     test_split: test
   MATH:
+    train_size_cap: 0
+    test_size_cap: 0
     train_hf_config: ''
     train_split: test
     question_key: problem

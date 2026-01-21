@@ -129,14 +129,14 @@ def _compute_traj_kl_batched(
 
     # Check if guided model to decide on progress bar strategy
     is_guided_model = isinstance(policy, GuidedHFModel)
-    
+
     outer_pbar = tqdm(
-        range(0, len(prompt_texts), batch_size), 
-        desc="Computing KL", 
+        range(0, len(prompt_texts), batch_size),
+        desc="Computing KL",
         leave=False,
-        disable=is_guided_model  # Disable outer bar for guided models (we'll use inner token bar)
+        disable=is_guided_model,  # Disable outer bar for guided models (we'll use inner token bar)
     )
-    
+
     for i in outer_pbar:
         batch_prompts = prompt_texts[i : i + batch_size]
         batch_conts = continuation_texts[i : i + batch_size]
@@ -185,17 +185,21 @@ def _compute_traj_kl_batched(
                 for idx, prompt_len in enumerate(batch_prompt_lens)
                 if ref_out.logits[idx, prompt_len - 1 : -1, :].numel() > 0
             )
-            
+
             # Single progress bar for all examples in this batch
             use_pbar = total_steps > 200
-            pbar = tqdm(
-                total=total_steps, 
-                desc=f"  KL tokens (batch {(i//batch_size)+1})", 
-                leave=False, 
-                unit="tok",
-                position=0  # Force to top position
-            ) if use_pbar else None
-            
+            pbar = (
+                tqdm(
+                    total=total_steps,
+                    desc=f"  KL tokens (batch {(i//batch_size)+1})",
+                    leave=False,
+                    unit="tok",
+                    position=0,  # Force to top position
+                )
+                if use_pbar
+                else None
+            )
+
             for idx, prompt_len in enumerate(batch_prompt_lens):
                 ref_logits_steps = ref_out.logits[idx : idx + 1, prompt_len - 1 : -1, :]
                 if ref_logits_steps.numel() == 0:
@@ -207,7 +211,7 @@ def _compute_traj_kl_batched(
                 kl_sum = 0.0
                 steps = ref_logits_steps.shape[1]
                 concat_input_ids = batched_input_ids[idx : idx + 1]
-                
+
                 for t in range(steps):
                     if pbar:
                         pbar.update(1)
@@ -218,7 +222,7 @@ def _compute_traj_kl_batched(
                     kl_t = _kl_divergence(guided_scores, base_scores).mean()
                     kl_sum += float(kl_t.item())
                 kl_results.append(kl_sum)
-            
+
             if pbar:
                 pbar.close()
         else:
@@ -270,8 +274,8 @@ def evaluate_pass1_maj8_batched(
 
     from pita.eval.cot_examples import get_8shot_prompt
 
-    max_examples = int(cfg.data_collection.max_examples or 0)
-    limit = max_examples if max_examples > 0 else len(ds)
+    limit = int(getattr(cfg.datasets[dataset], "test_size_cap", 0) or 0)
+    limit = limit if limit > 0 else len(ds)
     num_samples = int(cfg.evaluation.num_samples)
     has_verifier = hasattr(ds, "is_correct")
 
@@ -288,7 +292,7 @@ def evaluate_pass1_maj8_batched(
             prompt = get_8shot_prompt(dataset, ex.question)
         else:
             prompt = ds.hydrate_prompt(ex.question)
-        
+
         built = build_instruction_prompt(
             prompt,
             tokenizer=model.tokenizer,
@@ -314,8 +318,11 @@ def evaluate_pass1_maj8_batched(
 
     logger.info("\n📊 Computing metrics and KL divergence...")
     import time
+
     if isinstance(model, GuidedHFModel):
-        logger.info("⚠️  KL computation for guided models processes tokens step-by-step - this may take several minutes")
+        logger.info(
+            "⚠️  KL computation for guided models processes tokens step-by-step - this may take several minutes"
+        )
     kl_start = time.time()
     total = 0
     pass1 = 0
@@ -377,6 +384,7 @@ def evaluate_pass1_maj8_batched(
 
         # Save results to JSON for caching
         import json
+
         results_json = Path(save_dir) / "results.json"
         with open(results_json, "w") as f:
             json.dump(results, f, indent=2)
@@ -419,8 +427,8 @@ def evaluate_avg_reward_batched(
         batch_size=batch_size,
     )
 
-    max_examples = int(cfg.data_collection.max_examples or 0)
-    limit = max_examples if max_examples > 0 else len(ds)
+    limit = int(getattr(cfg.datasets[dataset], "test_size_cap", 0) or 0)
+    limit = limit if limit > 0 else len(ds)
 
     # Collect all examples first
     examples = list(islice(ds.iter(), limit))
@@ -498,6 +506,7 @@ def evaluate_avg_reward_batched(
 
         # Save results to JSON for caching
         import json
+
         results_json = Path(save_dir) / "results.json"
         with open(results_json, "w") as f:
             json.dump(results, f, indent=2)

@@ -521,11 +521,8 @@ def evaluate_pass1_maj8(
 
         from pita.eval.cot_examples import get_8shot_prompt
 
-        # Use evaluation.max_examples if set, otherwise fall back to data_collection.max_examples
-        eval_max = int(getattr(cfg.evaluation, "max_examples", 0) or 0)
-        data_max = int(cfg.data_collection.max_examples or 0)
-        max_examples = eval_max if eval_max > 0 else data_max
-        limit = max_examples if max_examples > 0 else len(ds)
+        limit = int(getattr(cfg.datasets[dataset], "test_size_cap", 0) or 0)
+        limit = limit if limit > 0 else len(ds)
         num_samples = int(cfg.evaluation.num_samples)
         batch_size = (
             batch_size if batch_size is not None else int(cfg.evaluation.batch_size)
@@ -543,7 +540,7 @@ def evaluate_pass1_maj8(
                 prompt = get_8shot_prompt(dataset, ex.question)
             else:
                 prompt = ds.hydrate_prompt(ex.question)
-            
+
             built = build_instruction_prompt(
                 prompt,
                 tokenizer=model.tokenizer,
@@ -594,25 +591,25 @@ def evaluate_pass1_maj8(
         # Build prompts for remaining examples: separate first samples from extra samples
         first_prompts_data = []  # List of (ex_idx, prompt_text)
         extra_prompts_data = []  # List of (ex_idx, prompt_text)
-        
+
         for idx, item in enumerate(prompts_data):
             if idx in completed_indices:
                 continue
-            
+
             n_existing = len(grouped_preds[idx])
             if n_existing == 0:
                 first_prompts_data.append((idx, item["built"]))
                 start_n = 1
             else:
                 start_n = n_existing
-                
+
             for _ in range(start_n, num_samples):
                 extra_prompts_data.append((idx, item["built"]))
 
         # Track saved scores for fast KL computation (only first sample per example)
         saved_scores_map: Dict[int, torch.Tensor] = {}
         use_fast_kl = isinstance(model, GuidedHFModel)
-        
+
         # Determine which examples need scores for KL (respect kl_sample_ratio)
         kl_sample_ratio = float(getattr(cfg.evaluation, "kl_sample_ratio", 1.0) or 1.0)
         n_examples = len(examples)
@@ -625,20 +622,24 @@ def evaluate_pass1_maj8(
 
         # PHASE 1: Generate first samples (with scores if needed)
         if first_prompts_data:
-            logger.info(f"\n🔄 Phase 1: Generating first samples for {len(first_prompts_data)} examples...")
+            logger.info(
+                f"\n🔄 Phase 1: Generating first samples for {len(first_prompts_data)} examples..."
+            )
             gen_start = time.time()
-            
+
             # Use small chunk size for score-heavy generation to avoid RAM peak
             score_chunk_size = batch_size * 2
-            
+
             for chunk_start in range(0, len(first_prompts_data), score_chunk_size):
                 chunk_end = min(chunk_start + score_chunk_size, len(first_prompts_data))
                 chunk_items = first_prompts_data[chunk_start:chunk_end]
                 chunk_prompts = [item[1] for item in chunk_items]
                 chunk_indices = [item[0] for item in chunk_items]
-                
-                needs_scores = use_fast_kl and any(idx in kl_sample_indices for idx in chunk_indices)
-                
+
+                needs_scores = use_fast_kl and any(
+                    idx in kl_sample_indices for idx in chunk_indices
+                )
+
                 if needs_scores:
                     chunk_preds, chunk_scores = model.continue_from_context_batch(
                         chunk_prompts,
@@ -647,7 +648,9 @@ def evaluate_pass1_maj8(
                         batch_size=batch_size,
                         return_scores=True,
                     )
-                    for i, (ex_idx, pred, scores) in enumerate(zip(chunk_indices, chunk_preds, chunk_scores)):
+                    for i, (ex_idx, pred, scores) in enumerate(
+                        zip(chunk_indices, chunk_preds, chunk_scores)
+                    ):
                         grouped_preds[ex_idx].append(pred)
                         if ex_idx in kl_sample_indices and scores is not None:
                             saved_scores_map[ex_idx] = scores
@@ -664,28 +667,37 @@ def evaluate_pass1_maj8(
                 # Checkpoint periodically
                 if save_dir is not None:
                     checkpoint_data = {
-                        "predictions": {str(i): p for i, p in enumerate(grouped_preds) if p},
-                        "completed_indices": [i for i, p in enumerate(grouped_preds) if len(p) == num_samples],
+                        "predictions": {
+                            str(i): p for i, p in enumerate(grouped_preds) if p
+                        },
+                        "completed_indices": [
+                            i
+                            for i, p in enumerate(grouped_preds)
+                            if len(p) == num_samples
+                        ],
                         "num_samples": num_samples,
                     }
                     _save_eval_checkpoint(Path(save_dir), checkpoint_data)
-                
+
                 import gc
+
                 gc.collect()
 
         # PHASE 2: Generate extra samples (never need scores)
         if extra_prompts_data:
-            logger.info(f"\n🔄 Phase 2: Generating remaining {len(extra_prompts_data)} samples...")
-            
+            logger.info(
+                f"\n🔄 Phase 2: Generating remaining {len(extra_prompts_data)} samples..."
+            )
+
             # Larger chunk size is fine here since no scores are returned
             extra_chunk_size = batch_size * 20
-            
+
             for chunk_start in range(0, len(extra_prompts_data), extra_chunk_size):
                 chunk_end = min(chunk_start + extra_chunk_size, len(extra_prompts_data))
                 chunk_items = extra_prompts_data[chunk_start:chunk_end]
                 chunk_prompts = [item[1] for item in chunk_items]
                 chunk_indices = [item[0] for item in chunk_items]
-                
+
                 chunk_preds = model.continue_from_context_batch(
                     chunk_prompts,
                     model.gen_cfg.max_new_tokens,
@@ -693,7 +705,7 @@ def evaluate_pass1_maj8(
                     batch_size=batch_size,
                     return_scores=False,
                 )
-                
+
                 for ex_idx, pred in zip(chunk_indices, chunk_preds):
                     grouped_preds[ex_idx].append(pred)
                     if len(grouped_preds[ex_idx]) == num_samples:
@@ -702,13 +714,16 @@ def evaluate_pass1_maj8(
                 # Checkpoint periodically
                 if save_dir is not None:
                     checkpoint_data = {
-                        "predictions": {str(i): p for i, p in enumerate(grouped_preds) if p},
+                        "predictions": {
+                            str(i): p for i, p in enumerate(grouped_preds) if p
+                        },
                         "completed_indices": list(completed_indices),
                         "num_samples": num_samples,
                     }
                     _save_eval_checkpoint(Path(save_dir), checkpoint_data)
-                
+
                 import gc
+
                 gc.collect()
 
             logger.info(f"✅ Generation complete")
@@ -894,11 +909,8 @@ def evaluate_avg_reward(
             batch_size=int(cfg.data_collection.reward_batch_size),
         )
 
-        # Use evaluation.max_examples if set, otherwise fall back to data_collection.max_examples
-        eval_max = int(getattr(cfg.evaluation, "max_examples", 0) or 0)
-        data_max = int(cfg.data_collection.max_examples or 0)
-        max_examples = eval_max if eval_max > 0 else data_max
-        limit = max_examples if max_examples > 0 else len(ds)
+        limit = int(getattr(cfg.datasets[dataset], "test_size_cap", 0) or 0)
+        limit = limit if limit > 0 else len(ds)
         batch_size = (
             batch_size if batch_size is not None else int(cfg.evaluation.batch_size)
         )
@@ -973,12 +985,12 @@ def evaluate_avg_reward(
 
             # Use small chunk size for score-heavy generation to avoid RAM peak
             score_chunk_size = batch_size * 2
-            
+
             for chunk_start in range(0, len(remaining_prompts), score_chunk_size):
                 chunk_end = min(chunk_start + score_chunk_size, len(remaining_prompts))
                 chunk_prompts = remaining_prompts[chunk_start:chunk_end]
                 global_start = start_idx + chunk_start
-                
+
                 # Check if any example in this chunk needs scores for KL
                 chunk_needs_scores = use_fast_kl and any(
                     (global_start + i) in kl_sample_indices
@@ -1014,8 +1026,9 @@ def evaluate_avg_reward(
                 if save_dir is not None:
                     checkpoint_data = {"predictions": preds}
                     _save_eval_checkpoint(Path(save_dir), checkpoint_data)
-                
+
                 import gc
+
                 gc.collect()
 
             logger.info(f"✅ Generation complete")

@@ -15,6 +15,11 @@ logs/
 *.log
 .DS_Store
 *.ipynb_checkpoints
+*.err
+*.out
+.cursor/
+slurm_scripts/
+conf/archive/
 
 
 

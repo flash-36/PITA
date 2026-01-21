@@ -108,8 +108,8 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         batch_size = int(cfg.algos[self.algo_key].batch_size)
         chunk_size = int(getattr(cfg.data_collection, "chunk_size", 100))
 
-        max_examples = int(cfg.data_collection.max_examples or 0)
-        limit = max_examples if max_examples > 0 else len(ds)
+        limit = int(getattr(cfg.datasets[dataset], "train_size_cap", 0) or 0)
+        limit = limit if limit > 0 else len(ds)
 
         # Collect all examples (lightweight - just metadata)
         examples = []
