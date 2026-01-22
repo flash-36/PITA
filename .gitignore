@@ -18,7 +18,6 @@ logs/
 *.err
 *.out
 .cursor/
-slurm_scripts/
 conf/archive/
 
 

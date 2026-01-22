@@ -1,5 +1,5 @@
 experiment:
-  name: Gemma_Llama_Experiment
+  name: Llama_IMDBGen_Experiment
   seed: 42
 rounds_of_training: 1
 resume_from: null
@@ -17,9 +17,7 @@ training:
   micro_batch_size: 4
   gradient_checkpointing: true
   datasets:
-  - GSM8K
   - IMDBGen
-  - TLDR
 data_collection:
   samples_per_example: 4
   seed: 42
@@ -37,12 +35,6 @@ evaluation:
   batch_size: 32
   kl_sample_ratio: 0.1  # 10% of examples for approximate KL
   datasets_by_train:
-    GSM8K:
-    - GSM8K
-    - MATH
-    - AIME
-    TLDR:
-    - TLDR
     IMDBGen:
     - IMDBGen
 parallel_generation: false
@@ -103,13 +95,12 @@ algos:
       top_k: 20
       use_cache: true
 model_pairs:
-- gemma
 - llama
 datasets:
   AIME:
     train_size_cap: 0
     test_size_cap: 0
-    train_hf_config: AIME2025-I
+    train_hf_config: AIME2025-II
     train_split: test
     question_key: question
     answer_key: answer
