@@ -156,10 +156,12 @@ def _compute_kl_fast_with_scores(
 
         padded_input_ids = []
         padded_attention_masks = []
+        batch_pad_lens = []
         for input_ids, attention_mask in zip(batch_input_ids, batch_attention_masks):
             pad_len = max_len - input_ids.shape[0]
-            padded_input_ids.append(F.pad(input_ids, (0, pad_len), value=pad_id))
-            padded_attention_masks.append(F.pad(attention_mask, (0, pad_len), value=0))
+            batch_pad_lens.append(pad_len)
+            padded_input_ids.append(F.pad(input_ids, (pad_len, 0), value=pad_id))
+            padded_attention_masks.append(F.pad(attention_mask, (pad_len, 0), value=0))
 
         batched_input_ids = torch.stack(padded_input_ids).to(device)
         batched_attention_masks = torch.stack(padded_attention_masks).to(device)
@@ -173,8 +175,9 @@ def _compute_kl_fast_with_scores(
 
         # Compute KL for each example using saved scores
         for idx, prompt_len in enumerate(batch_prompt_lens):
+            pad_len = batch_pad_lens[idx]
             ref_logits_steps = ref_out.logits[
-                idx, prompt_len - 1 : -1, :
+                idx, pad_len + prompt_len - 1 : -1, :
             ]  # [seq_len, vocab]
 
             if ref_logits_steps.numel() == 0:
@@ -385,10 +388,12 @@ def _compute_traj_kl_batched(
 
         padded_input_ids = []
         padded_attention_masks = []
+        batch_pad_lens = []
         for input_ids, attention_mask in zip(batch_input_ids, batch_attention_masks):
             pad_len = max_len - input_ids.shape[0]
-            padded_input_ids.append(F.pad(input_ids, (0, pad_len), value=pad_id))
-            padded_attention_masks.append(F.pad(attention_mask, (0, pad_len), value=0))
+            batch_pad_lens.append(pad_len)
+            padded_input_ids.append(F.pad(input_ids, (pad_len, 0), value=pad_id))
+            padded_attention_masks.append(F.pad(attention_mask, (pad_len, 0), value=0))
 
         batched_input_ids = torch.stack(padded_input_ids).to(device)
         batched_attention_masks = torch.stack(padded_attention_masks).to(device)
@@ -402,11 +407,12 @@ def _compute_traj_kl_batched(
         batch_kl_values = []
         if is_guided:
             total_steps = sum(
-                ref_out.logits[idx, prompt_len - 1 : -1, :].shape[0]
+                ref_out.logits[idx, batch_pad_lens[idx] + prompt_len - 1 : -1, :].shape[0]
                 for idx, prompt_len in enumerate(batch_prompt_lens)
-                if ref_out.logits[idx, prompt_len - 1 : -1, :].numel() > 0
+                if ref_out.logits[idx, batch_pad_lens[idx] + prompt_len - 1 : -1, :].numel() > 0
             )
 
+            # Single progress bar for all examples in this batch
             use_pbar = total_steps > 200
             pbar = (
                 tqdm(
@@ -414,14 +420,15 @@ def _compute_traj_kl_batched(
                     desc=f"  KL tokens (batch {batch_idx+1}/{total_batches})",
                     leave=False,
                     unit="tok",
-                    position=0,
+                    position=0,  # Force to top position
                 )
                 if use_pbar
                 else None
             )
 
             for idx, prompt_len in enumerate(batch_prompt_lens):
-                ref_logits_steps = ref_out.logits[idx : idx + 1, prompt_len - 1 : -1, :]
+                pad_len = batch_pad_lens[idx]
+                ref_logits_steps = ref_out.logits[idx : idx + 1, pad_len + prompt_len - 1 : -1, :]
                 if ref_logits_steps.numel() == 0:
                     batch_kl_values.append(0.0)
                     continue
@@ -435,7 +442,7 @@ def _compute_traj_kl_batched(
                 for t in range(steps):
                     if pbar:
                         pbar.update(1)
-                    prefix_len = prompt_len + t
+                    prefix_len = pad_len + prompt_len + t
                     prefix_ids = concat_input_ids[:, :prefix_len]
                     base_scores = ref_logits_steps[:, t, :]
                     guided_scores = proc(prefix_ids, base_scores)
@@ -453,8 +460,9 @@ def _compute_traj_kl_batched(
             )
 
             for idx, prompt_len in enumerate(batch_prompt_lens):
-                ref_logits_steps = ref_out.logits[idx : idx + 1, prompt_len - 1 : -1, :]
-                pol_logits_steps = pol_out.logits[idx : idx + 1, prompt_len - 1 : -1, :]
+                pad_len = batch_pad_lens[idx]
+                ref_logits_steps = ref_out.logits[idx : idx + 1, pad_len + prompt_len - 1 : -1, :]
+                pol_logits_steps = pol_out.logits[idx : idx + 1, pad_len + prompt_len - 1 : -1, :]
 
                 if ref_logits_steps.numel() == 0:
                     batch_kl_values.append(0.0)
