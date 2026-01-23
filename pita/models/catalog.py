@@ -13,6 +13,8 @@ _ALIAS_TO_ID: Dict[str, str] = {
     # Phi aliases
     "phi-mini": "microsoft/Phi-4-mini-reasoning",
     "phi-plus": "microsoft/Phi-4-reasoning-plus",
+    "qwen-7b": "Qwen/Qwen2.5-7B-Instruct",
+    "qwen-1.5b": "Qwen/Qwen2.5-1.5B-Instruct",
 }
 
 
@@ -22,6 +24,7 @@ _FAMILY_TO_PAIR: Dict[str, Tuple[str, str]] = {
     "gpt": ("gpt2-medium", "gpt2"),
     # Phi family: (ref_model_alias, value_classifier_alias)
     "phi": ("phi-plus", "phi-mini"),
+    "qwen": ("qwen-7b", "qwen-1.5b"),
 }
 
 

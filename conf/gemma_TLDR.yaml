@@ -33,7 +33,7 @@ evaluation:
   - 4.0
   num_samples: 8
   batch_size: 32
-  kl_sample_ratio: 0.1  # 10% of examples for approximate KL
+  kl_sample_ratio: 0.1
   datasets_by_train:
     TLDR:
     - TLDR
@@ -47,7 +47,7 @@ algos:
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
-    weight_decay: 0.0
+    weight_decay: 0.01
     grad_clip: 1.0
     loss_type: bce
     num_atoms: 11
@@ -65,7 +65,7 @@ algos:
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
-    weight_decay: 0.0
+    weight_decay: 0.01
     grad_clip: 1.0
     loss_type: bce
     num_atoms: 11
@@ -83,7 +83,7 @@ algos:
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
-    weight_decay: 0.0
+    weight_decay: 0.01
     grad_clip: 1.0
     loss_type: mle
     proxy_loss_type: bradley_terry
@@ -100,7 +100,7 @@ algos:
 model_pairs:
 - gemma
 datasets:
-  AIME:
+  AIME2025:
     train_size_cap: 0
     test_size_cap: 0
     train_hf_config: AIME2025-II
@@ -108,8 +108,18 @@ datasets:
     question_key: question
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
-    test_hf_config: AIME2025-I
-    test_split: test
+    test_hf_config: AIME2025-II
+    test_split: heldout
+  AIME2024:
+    train_size_cap: 0
+    test_size_cap: 0
+    train_hf_config: default
+    train_split: train
+    question_key: problem
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: default
+    test_split: heldout
   GSM8K:
     train_size_cap: 0
     test_size_cap: 0
@@ -149,4 +159,14 @@ datasets:
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
     test_hf_config: ''
-    test_split: test
+    test_split: heldout
+  AIME22to24:
+    train_size_cap: 0
+    test_size_cap: 0
+    train_hf_config: default
+    train_split: train
+    question_key: problem
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: default
+    test_split: heldout

@@ -67,7 +67,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         ref_hf = self._build_model(cfg, ref_model)
 
         if int(round_idx) > 0 and cls_model is not None:
-            verifiable = {"AIME", "GSM8K", "MATH"}
+            verifiable = {"AIME2025", "AIME2024", "AIME22to24", "GSM8K", "MATH"}
             loss_type = "bce" if dataset in verifiable else "mle"
             prev_classifier = ValueClassifier(
                 cls_model,
@@ -283,7 +283,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         ref = self._build_model(cfg, ref_model)
-        verifiable = {"AIME", "GSM8K", "MATH"}
+        verifiable = {"AIME2025", "AIME2024", "AIME22to24", "GSM8K", "MATH"}
         loss_type = "bce" if dataset in verifiable else "mle"
 
         # Phase 1: Classifier Training

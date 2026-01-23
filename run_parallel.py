@@ -183,7 +183,13 @@ def evaluate_base_models_cot8(
     eval_datasets = set()
     for train_ds in cfg.training.datasets:
         eval_datasets.update(cfg.evaluation.datasets_by_train.get(train_ds, [train_ds]))
-    datasets = sorted([ds for ds in eval_datasets if ds in {"GSM8K", "MATH", "AIME"}])
+    datasets = sorted(
+        [
+            ds
+            for ds in eval_datasets
+            if ds in {"GSM8K", "MATH", "AIME2025", "AIME2024", "AIME22to24"}
+        ]
+    )
 
     # Count completed vs pending
     pending_evals = []
@@ -689,7 +695,10 @@ def main(cfg: DictConfig) -> None:
 
     # Evaluate 8-shot CoT base model (for reasoning datasets)
     cot8_results = {}
-    if any(ds in {"GSM8K", "MATH", "AIME"} for ds in cfg.training.datasets):
+    if any(
+        ds in {"GSM8K", "MATH", "AIME2025", "AIME2024", "AIME22to24"}
+        for ds in cfg.training.datasets
+    ):
         cot8_results = evaluate_base_models_cot8(cfg, run_root, state_manager)
         logger.info(f"📊 8-shot CoT base model evaluation complete")
 

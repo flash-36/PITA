@@ -49,6 +49,7 @@ class HFModel:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             else:
                 raise ValueError("Pad token not found")
+        self.tokenizer.padding_side = "left"
         torch_dtype = {
             "bfloat16": torch.bfloat16,
             "float16": torch.float16,

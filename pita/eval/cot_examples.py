@@ -78,7 +78,7 @@ def get_8shot_prompt(dataset_name: str, question: str) -> str:
         examples = GSM8K_8SHOT
     elif dataset_name == "MATH":
         examples = MATH_8SHOT
-    elif dataset_name == "AIME":
+    elif dataset_name in {"AIME2025", "AIME2024", "AIME22to24"}:
         examples = AIME_8SHOT
     else:
         # Fallback to direct prompt if no examples defined

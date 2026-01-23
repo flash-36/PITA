@@ -1,5 +1,5 @@
 experiment:
-  name: Llama_IMDBGen_Experiment
+  name: Qwen_IMDBGen_Experiment
   seed: 42
 rounds_of_training: 1
 resume_from: null
@@ -98,7 +98,7 @@ algos:
       top_k: 20
       use_cache: true
 model_pairs:
-- llama
+- qwen
 datasets:
   AIME2025:
     train_size_cap: 0

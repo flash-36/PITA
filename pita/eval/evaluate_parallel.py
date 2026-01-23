@@ -88,7 +88,7 @@ def _compute_traj_kl_for_text(
             guided_scores = proc(prefix_ids, base_scores)
             kl_t = _kl_divergence(guided_scores, base_scores).mean()
             kl_sum += float(kl_t.item())
-        return kl_sum
+        return kl_sum / steps
     else:
         policy_model: HFModel = policy
         pol_out = policy_model.model(
@@ -98,7 +98,7 @@ def _compute_traj_kl_for_text(
         )
         pol_logits_steps = pol_out.logits[:, prompt_len - 1 : -1, :]
         kl_steps = _kl_divergence(pol_logits_steps, ref_logits_steps)
-        return float(kl_steps.sum().item())
+        return float(kl_steps.mean().item())
 
 
 @torch.inference_mode()
@@ -231,7 +231,7 @@ def _compute_traj_kl_batched(
                     guided_scores = proc(prefix_ids, base_scores)
                     kl_t = _kl_divergence(guided_scores, base_scores).mean()
                     kl_sum += float(kl_t.item())
-                kl_results.append(kl_sum)
+                kl_results.append(kl_sum / steps)
 
             if pbar:
                 pbar.close()
@@ -255,7 +255,7 @@ def _compute_traj_kl_batched(
                     kl_results.append(0.0)
                 else:
                     kl_steps = _kl_divergence(pol_logits_steps, ref_logits_steps)
-                    kl_results.append(float(kl_steps.sum().item()))
+                    kl_results.append(float(kl_steps.mean().item()))
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

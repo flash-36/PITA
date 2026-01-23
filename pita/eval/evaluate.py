@@ -198,7 +198,7 @@ def _compute_kl_fast_with_scores(
 
             # Compute KL(guided || ref) for all tokens at once
             kl_per_token = _kl_divergence(guided_scores, ref_logits_steps)
-            kl_results.append(float(kl_per_token.sum().item()))
+            kl_results.append(float(kl_per_token.mean().item()))
 
         del ref_out
         if torch.cuda.is_available():
@@ -275,7 +275,7 @@ def _compute_traj_kl_for_text(
             guided_scores = proc(prefix_ids, base_scores)
             kl_t = _kl_divergence(guided_scores, base_scores).mean()
             kl_sum += float(kl_t.item())
-        return kl_sum
+        return kl_sum / steps
     else:
         # Policy is a plain HFModel
         policy_model: HFModel = policy
@@ -285,9 +285,9 @@ def _compute_traj_kl_for_text(
             use_cache=False,
         )
         pol_logits_steps = pol_out.logits[:, prompt_len - 1 : -1, :]
-        # Token-wise KL then sum over continuation
+        # Token-wise KL then mean over continuation
         kl_steps = _kl_divergence(pol_logits_steps, ref_logits_steps)
-        return float(kl_steps.sum().item())
+        return float(kl_steps.mean().item())
 
 
 @torch.inference_mode()
@@ -407,9 +407,14 @@ def _compute_traj_kl_batched(
         batch_kl_values = []
         if is_guided:
             total_steps = sum(
-                ref_out.logits[idx, batch_pad_lens[idx] + prompt_len - 1 : -1, :].shape[0]
+                ref_out.logits[idx, batch_pad_lens[idx] + prompt_len - 1 : -1, :].shape[
+                    0
+                ]
                 for idx, prompt_len in enumerate(batch_prompt_lens)
-                if ref_out.logits[idx, batch_pad_lens[idx] + prompt_len - 1 : -1, :].numel() > 0
+                if ref_out.logits[
+                    idx, batch_pad_lens[idx] + prompt_len - 1 : -1, :
+                ].numel()
+                > 0
             )
 
             # Single progress bar for all examples in this batch
@@ -428,7 +433,9 @@ def _compute_traj_kl_batched(
 
             for idx, prompt_len in enumerate(batch_prompt_lens):
                 pad_len = batch_pad_lens[idx]
-                ref_logits_steps = ref_out.logits[idx : idx + 1, pad_len + prompt_len - 1 : -1, :]
+                ref_logits_steps = ref_out.logits[
+                    idx : idx + 1, pad_len + prompt_len - 1 : -1, :
+                ]
                 if ref_logits_steps.numel() == 0:
                     batch_kl_values.append(0.0)
                     continue
@@ -448,7 +455,7 @@ def _compute_traj_kl_batched(
                     guided_scores = proc(prefix_ids, base_scores)
                     kl_t = _kl_divergence(guided_scores, base_scores).mean()
                     kl_sum += float(kl_t.item())
-                batch_kl_values.append(kl_sum)
+                batch_kl_values.append(kl_sum / steps)
 
             if pbar:
                 pbar.close()
@@ -461,14 +468,18 @@ def _compute_traj_kl_batched(
 
             for idx, prompt_len in enumerate(batch_prompt_lens):
                 pad_len = batch_pad_lens[idx]
-                ref_logits_steps = ref_out.logits[idx : idx + 1, pad_len + prompt_len - 1 : -1, :]
-                pol_logits_steps = pol_out.logits[idx : idx + 1, pad_len + prompt_len - 1 : -1, :]
+                ref_logits_steps = ref_out.logits[
+                    idx : idx + 1, pad_len + prompt_len - 1 : -1, :
+                ]
+                pol_logits_steps = pol_out.logits[
+                    idx : idx + 1, pad_len + prompt_len - 1 : -1, :
+                ]
 
                 if ref_logits_steps.numel() == 0:
                     batch_kl_values.append(0.0)
                 else:
                     kl_steps = _kl_divergence(pol_logits_steps, ref_logits_steps)
-                    batch_kl_values.append(float(kl_steps.sum().item()))
+                    batch_kl_values.append(float(kl_steps.mean().item()))
 
         # Add batch results and save checkpoint
         kl_results.extend(batch_kl_values)

@@ -12,6 +12,10 @@ echo "📦 Running Experiment: Gemma IMDBGen"
 python run_parallel.py --config-name=gemma_IMDBGen
 echo "📦 Running Experiment: Gemma TLDR"
 python run_parallel.py --config-name=gemma_TLDR
+echo "📦 Running Experiment: Gemma MATH"
+python run_parallel.py --config-name=gemma_MATH
+echo "📦 Running Experiment: Gemma AIME22to24"
+python run_parallel.py --config-name=gemma_AIME22to24
 
 # 2. Llama
 echo "📦 Running Experiment: Llama GSM8K"
@@ -20,6 +24,10 @@ echo "📦 Running Experiment: Llama IMDBGen"
 python run_parallel.py --config-name=llama_IMDBGen
 echo "📦 Running Experiment: Llama TLDR"
 python run_parallel.py --config-name=llama_TLDR
+echo "📦 Running Experiment: Llama MATH"
+python run_parallel.py --config-name=llama_MATH
+echo "📦 Running Experiment: Llama AIME22to24"
+python run_parallel.py --config-name=llama_AIME22to24
 
 # 3. Phi
 echo "📦 Running Experiment: Phi GSM8K"
@@ -28,5 +36,21 @@ echo "📦 Running Experiment: Phi IMDBGen"
 python run_parallel.py --config-name=phi_IMDBGen
 echo "📦 Running Experiment: Phi TLDR"
 python run_parallel.py --config-name=phi_TLDR
+echo "📦 Running Experiment: Phi MATH"
+python run_parallel.py --config-name=phi_MATH
+echo "📦 Running Experiment: Phi AIME22to24"
+python run_parallel.py --config-name=phi_AIME22to24
+
+# 4. Qwen
+echo "📦 Running Experiment: Qwen GSM8K"
+python run_parallel.py --config-name=qwen_GSM8K
+echo "📦 Running Experiment: Qwen IMDBGen"
+python run_parallel.py --config-name=qwen_IMDBGen
+echo "📦 Running Experiment: Qwen TLDR"
+python run_parallel.py --config-name=qwen_TLDR
+echo "📦 Running Experiment: Qwen MATH"
+python run_parallel.py --config-name=qwen_MATH
+echo "📦 Running Experiment: Qwen AIME22to24"
+python run_parallel.py --config-name=qwen_AIME22to24
 
 echo "✅ All experiments finished successfully!"

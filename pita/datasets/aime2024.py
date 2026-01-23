@@ -16,10 +16,10 @@ class Sample:
     answer: str
 
 
-@register_dataset("AIME2025")
-class AIME2025:
+@register_dataset("AIME2024")
+class AIME2024:
     def __init__(self, hf_config: str, split: str, question_key: str, answer_key: str):
-        self.ds = load_dataset("opencompass/AIME2025", hf_config, split=split)
+        self.ds = load_dataset("HuggingFaceH4/aime_2024", hf_config, split=split)
         self.q_key = question_key
         self.a_key = answer_key
 
