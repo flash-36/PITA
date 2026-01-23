@@ -88,6 +88,9 @@ algos:
     weight_decay: 0.0
     grad_clip: 1.0
     loss_type: mle
+    proxy_loss_type: bradley_terry
+    proxy_lr: 2.0e-05
+    proxy_epochs: 5
     num_atoms: 11
     V_min: 0.0
     V_max: 1.0
