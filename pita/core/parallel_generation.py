@@ -133,12 +133,16 @@ class ParallelDataGenerator:
             expected_results = sum(len(jobs) for jobs in jobs_per_worker if jobs)
 
             with tqdm(total=expected_results, desc="Generating data") as pbar:
-                for _ in range(expected_results):
+                for i in range(expected_results):
                     worker_records = result_queue.get()
                     if isinstance(worker_records, Exception):
                         raise worker_records
                     all_records.extend(worker_records)
                     pbar.update(1)
+                    
+                    remaining = expected_results - (i + 1)
+                    if (i + 1) % 10 == 0 or remaining == 0:
+                        logger.info(f"🧪 Data Gen | Processed {i+1}/{expected_results} examples | {remaining} remaining")
 
             # Wait for all processes
             for p in processes:
@@ -285,7 +289,12 @@ class ParallelDataGenerator:
         reward_scorer = reward_scorer_factory(device_id=device_id)
 
         all_records = []
-        for ex in tqdm(examples, desc="Generating data (sequential)"):
+        total_examples = len(examples)
+        for i, ex in enumerate(tqdm(examples, desc="Generating data (sequential)")):
+            remaining = total_examples - (i + 1)
+            if i % 10 == 0 or remaining == 0:
+                logger.info(f"🧪 Data Gen (Seq) | Processed {i+1}/{total_examples} examples | {remaining} remaining")
+            
             records = self._process_single_example(
                 ex,
                 model,

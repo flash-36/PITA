@@ -137,7 +137,14 @@ def _compute_traj_kl_batched(
         disable=is_guided_model,  # Disable outer bar for guided models (we'll use inner token bar)
     )
 
+    total_prompts = len(prompt_texts)
     for i in outer_pbar:
+        remaining_prompts = total_prompts - (i + batch_size)
+        if i % (batch_size * 5) == 0 or remaining_prompts <= 0:
+            logger.info(
+                f"📊 KL Eval | Batch starting at {i}/{total_prompts} | {max(0, remaining_prompts)} prompts remaining"
+            )
+
         batch_prompts = prompt_texts[i : i + batch_size]
         batch_conts = continuation_texts[i : i + batch_size]
 
@@ -302,7 +309,14 @@ def evaluate_pass1_maj8_batched(
     from tqdm import tqdm
 
     prompts_data = []
-    for ex in tqdm(examples, desc="🔧 Preparing prompts", unit="ex"):
+    total_examples = len(examples)
+    for i, ex in enumerate(tqdm(examples, desc="🔧 Preparing prompts", unit="ex")):
+        remaining = total_examples - (i + 1)
+        if i % 100 == 0 or remaining == 0:
+            logger.info(
+                f"📊 Eval Prep | {i+1}/{total_examples} examples | {remaining} remaining"
+            )
+
         if is_cot8:
             prompt = get_8shot_prompt(dataset, ex.question)
         else:
@@ -453,7 +467,14 @@ def evaluate_avg_reward_batched(
     from tqdm import tqdm
 
     prompts_data = []
-    for ex in tqdm(examples, desc="🔧 Preparing prompts", unit="ex"):
+    total_examples = len(examples)
+    for i, ex in enumerate(tqdm(examples, desc="🔧 Preparing prompts", unit="ex")):
+        remaining = total_examples - (i + 1)
+        if i % 100 == 0 or remaining == 0:
+            logger.info(
+                f"📊 Eval Prep | {i+1}/{total_examples} examples | {remaining} remaining"
+            )
+
         prompt = ds.hydrate_prompt(ex.question)
         built = build_instruction_prompt(
             prompt,

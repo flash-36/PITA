@@ -430,6 +430,12 @@ class ParallelJobExecutor:
                         completed += 1
                         pbar.update(1)
 
+                        remaining = total - completed
+                        if completed % 1 == 0 or remaining == 0:
+                            logger.info(
+                                f"⚙️  Jobs | {completed}/{total} completed | {remaining} remaining"
+                            )
+
                         if result.success:
                             logger.info(f"✅ Completed: {result.job}")
                         else:

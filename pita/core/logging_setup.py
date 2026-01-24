@@ -34,3 +34,23 @@ def add_file_logger(log_path: str):
         enqueue=True,
     )
 
+
+class LogStream:
+    """Stream that redirects writes to loguru."""
+
+    def __init__(self, level="INFO"):
+        self.level = level
+
+    def write(self, message):
+        if message.strip():
+            logger.log(self.level, message.strip())
+
+    def flush(self):
+        pass
+
+
+def intercept_stdout_stderr():
+    """Redirect stdout and stderr to loguru."""
+    sys.stdout = LogStream("INFO")
+    sys.stderr = LogStream("ERROR")
+

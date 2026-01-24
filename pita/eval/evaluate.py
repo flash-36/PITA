@@ -554,7 +554,14 @@ def evaluate_pass1_maj8(
         )
 
         prompts_data = []
-        for ex in examples:
+        total_examples = len(examples)
+        for i, ex in enumerate(examples):
+            remaining = total_examples - (i + 1)
+            if i % 100 == 0 or remaining == 0:
+                logger.info(
+                    f"📊 Eval Prep | {i+1}/{total_examples} examples | {remaining} remaining"
+                )
+
             if is_cot8:
                 prompt = get_8shot_prompt(dataset, ex.question)
             else:
@@ -942,7 +949,14 @@ def evaluate_avg_reward(
 
         # PHASE 1: Build all prompts
         prompts_data = []
-        for ex in examples:
+        total_examples = len(examples)
+        for i, ex in enumerate(examples):
+            remaining = total_examples - (i + 1)
+            if i % 100 == 0 or remaining == 0:
+                logger.info(
+                    f"📊 Eval Prep | {i+1}/{total_examples} examples | {remaining} remaining"
+                )
+
             prompt = ds.hydrate_prompt(ex.question)
             built = build_instruction_prompt(
                 prompt,

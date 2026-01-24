@@ -351,12 +351,16 @@ class GRPOTrainer:
         total_epochs = int(epochs)
         start_time = time.perf_counter()
         epoch_bar = tqdm(range(total_epochs), desc="GRPO:epochs")
-
         for e in epoch_bar:
+            total_batches = len(loader)
             batch_bar = tqdm(
                 loader, desc=f"GRPO:epoch {e + 1}/{total_epochs}", leave=False
             )
-            for batch in batch_bar:
+            for i, batch in enumerate(batch_bar):
+                remaining = total_batches - (i + 1)
+                if i % 10 == 0 or remaining == 0:
+                    logger.info(f"⏳ Epoch {e+1}/{total_epochs} | Batch {i+1}/{total_batches} | {remaining} batches remaining")
+                
                 if (
                     self.micro_batch_size
                     and batch["input_ids"].size(0) > self.micro_batch_size

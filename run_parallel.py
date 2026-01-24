@@ -295,6 +295,7 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
     from pita.core.job_state import JobStateManager, JobState
     from pita.core.io import create_subdir
     from pita.core.logging_context import logging_context, setup_context_logging
+    from pita.core.logging_setup import intercept_stdout_stderr
     import json
     import time
 
@@ -304,6 +305,7 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
 
     # Setup context-aware logging in worker process
     setup_context_logging()
+    intercept_stdout_stderr()
 
     # Unpack arguments
     cfg_dict, run_root_str, state_manager_dict = args
@@ -532,8 +534,10 @@ def main(cfg: DictConfig) -> None:
     from pathlib import Path
     from pita.core.job_state import JobStateManager
     from datetime import datetime
+    from pita.core.logging_setup import intercept_stdout_stderr
 
     setup_context_logging()
+    intercept_stdout_stderr()
 
     # Check if resuming from a previous run
     resume_from = cfg.get("resume_from", None)
