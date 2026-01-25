@@ -73,8 +73,8 @@ datasets:
     test_hf_config: default
     test_split: heldout
   GSM8K:
-    train_size_cap: 2
-    test_size_cap: 500
+    train_size_cap: 0
+    test_size_cap: 0
     train_hf_config: main
     train_split: train
     question_key: question
@@ -83,8 +83,8 @@ datasets:
     test_hf_config: main
     test_split: heldout
   TLDR:
-    train_size_cap: 2
-    test_size_cap: 500
+    train_size_cap: 0
+    test_size_cap: 0
     train_hf_config: ''
     train_split: train
     question_key: prompt
@@ -93,8 +93,8 @@ datasets:
     test_hf_config: ''
     test_split: test
   IMDBGen:
-    train_size_cap: 2
-    test_size_cap: 500
+    train_size_cap: 0
+    test_size_cap: 5000
     train_hf_config: ''
     train_split: train
     question_key: text
@@ -103,8 +103,8 @@ datasets:
     test_hf_config: ''
     test_split: test
   MATH:
-    train_size_cap: 2
-    test_size_cap: 500
+    train_size_cap: 0
+    test_size_cap: 0
     train_hf_config: ''
     train_split: test
     question_key: problem
@@ -113,8 +113,8 @@ datasets:
     test_hf_config: ''
     test_split: heldout
   AIME22to24:
-    train_size_cap: 2
-    test_size_cap: 500
+    train_size_cap: 0
+    test_size_cap: 0
     train_hf_config: default
     train_split: train
     question_key: problem
