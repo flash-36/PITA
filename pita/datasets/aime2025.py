@@ -16,7 +16,7 @@ class Sample:
     answer: str
 
 
-@register_dataset("AIME")
+@register_dataset("AIME2025")
 class AIME2025:
     def __init__(self, hf_config: str, split: str, question_key: str, answer_key: str):
         self.ds = load_dataset("opencompass/AIME2025", hf_config, split=split)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from collections import Counter
 from pathlib import Path
+import time
 
 from omegaconf import DictConfig
 from datasets import Dataset
@@ -87,7 +88,7 @@ def _compute_traj_kl_for_text(
             guided_scores = proc(prefix_ids, base_scores)
             kl_t = _kl_divergence(guided_scores, base_scores).mean()
             kl_sum += float(kl_t.item())
-        return kl_sum
+        return kl_sum / steps
     else:
         policy_model: HFModel = policy
         pol_out = policy_model.model(
@@ -97,7 +98,176 @@ def _compute_traj_kl_for_text(
         )
         pol_logits_steps = pol_out.logits[:, prompt_len - 1 : -1, :]
         kl_steps = _kl_divergence(pol_logits_steps, ref_logits_steps)
-        return float(kl_steps.sum().item())
+        return float(kl_steps.mean().item())
+
+
+@torch.inference_mode()
+def _compute_traj_kl_batched(
+    policy: Any,
+    ref: Optional[HFModel],
+    *,
+    prompt_texts: List[str],
+    continuation_texts: List[str],
+    batch_size: int = 8,
+) -> List[float]:
+    """Compute trajectory KL for multiple (prompt, continuation) pairs in batches."""
+    if isinstance(policy, GuidedHFModel):
+        ref_model: HFModel = policy.ref
+        is_guided = True
+    else:
+        if ref is None:
+            return [0.0] * len(prompt_texts)
+        ref_model = ref
+        is_guided = False
+        policy_model: HFModel = policy
+
+    tok = ref_model.tokenizer
+    device = ref_model.model.device
+    kl_results = []
+
+    from tqdm import tqdm
+
+    # Check if guided model to decide on progress bar strategy
+    is_guided_model = isinstance(policy, GuidedHFModel)
+
+    outer_pbar = tqdm(
+        range(0, len(prompt_texts), batch_size),
+        desc="Computing KL",
+        leave=False,
+        disable=is_guided_model,  # Disable outer bar for guided models (we'll use inner token bar)
+    )
+
+    total_prompts = len(prompt_texts)
+    for i in outer_pbar:
+        remaining_prompts = total_prompts - (i + batch_size)
+        if i % (batch_size * 5) == 0 or remaining_prompts <= 0:
+            logger.info(
+                f"📊 KL Eval | Batch starting at {i}/{total_prompts} | {max(0, remaining_prompts)} prompts remaining"
+            )
+
+        batch_prompts = prompt_texts[i : i + batch_size]
+        batch_conts = continuation_texts[i : i + batch_size]
+
+        batch_prompt_lens = []
+        batch_input_ids = []
+        batch_attention_masks = []
+
+        for prompt_text, cont_text in zip(batch_prompts, batch_conts):
+            ids_prompt = tok(prompt_text, return_tensors="pt")
+            ids_cont = tok(cont_text, return_tensors="pt", add_special_tokens=False)
+            concat_input_ids = torch.cat(
+                [ids_prompt["input_ids"], ids_cont["input_ids"]], dim=1
+            )
+            attention_mask = concat_input_ids.ne(
+                getattr(tok, "pad_token_id", tok.eos_token_id)
+            ).long()
+
+            batch_prompt_lens.append(ids_prompt["input_ids"].shape[1])
+            batch_input_ids.append(concat_input_ids.squeeze(0))
+            batch_attention_masks.append(attention_mask.squeeze(0))
+
+        max_len = max(x.shape[0] for x in batch_input_ids)
+        pad_id = getattr(tok, "pad_token_id", tok.eos_token_id)
+
+        padded_input_ids = []
+        padded_attention_masks = []
+        batch_pad_lens = []
+        for input_ids, attention_mask in zip(batch_input_ids, batch_attention_masks):
+            pad_len = max_len - input_ids.shape[0]
+            batch_pad_lens.append(pad_len)
+            padded_input_ids.append(F.pad(input_ids, (pad_len, 0), value=pad_id))
+            padded_attention_masks.append(F.pad(attention_mask, (pad_len, 0), value=0))
+
+        batched_input_ids = torch.stack(padded_input_ids).to(device)
+        batched_attention_masks = torch.stack(padded_attention_masks).to(device)
+
+        ref_out = ref_model.model(
+            input_ids=batched_input_ids,
+            attention_mask=batched_attention_masks,
+            use_cache=False,
+        )
+
+        if is_guided:
+            # Calculate total steps for progress tracking
+            total_steps = sum(
+                ref_out.logits[idx, batch_pad_lens[idx] + prompt_len - 1 : -1, :].shape[
+                    0
+                ]
+                for idx, prompt_len in enumerate(batch_prompt_lens)
+                if ref_out.logits[
+                    idx, batch_pad_lens[idx] + prompt_len - 1 : -1, :
+                ].numel()
+                > 0
+            )
+
+            # Single progress bar for all examples in this batch
+            use_pbar = total_steps > 200
+            pbar = (
+                tqdm(
+                    total=total_steps,
+                    desc=f"  KL tokens (batch {(i//batch_size)+1})",
+                    leave=False,
+                    unit="tok",
+                    position=0,  # Force to top position
+                )
+                if use_pbar
+                else None
+            )
+
+            for idx, prompt_len in enumerate(batch_prompt_lens):
+                pad_len = batch_pad_lens[idx]
+                ref_logits_steps = ref_out.logits[
+                    idx : idx + 1, pad_len + prompt_len - 1 : -1, :
+                ]
+                if ref_logits_steps.numel() == 0:
+                    kl_results.append(0.0)
+                    continue
+
+                proc = policy._build_processor()
+                policy._reset_state(proc)
+                kl_sum = 0.0
+                steps = ref_logits_steps.shape[1]
+                concat_input_ids = batched_input_ids[idx : idx + 1]
+
+                for t in range(steps):
+                    if pbar:
+                        pbar.update(1)
+                    prefix_len = pad_len + prompt_len + t
+                    prefix_ids = concat_input_ids[:, :prefix_len]
+                    base_scores = ref_logits_steps[:, t, :]
+                    guided_scores = proc(prefix_ids, base_scores)
+                    kl_t = _kl_divergence(guided_scores, base_scores).mean()
+                    kl_sum += float(kl_t.item())
+                kl_results.append(kl_sum / steps)
+
+            if pbar:
+                pbar.close()
+        else:
+            pol_out = policy_model.model(
+                input_ids=batched_input_ids,
+                attention_mask=batched_attention_masks,
+                use_cache=False,
+            )
+
+            for idx, prompt_len in enumerate(batch_prompt_lens):
+                pad_len = batch_pad_lens[idx]
+                ref_logits_steps = ref_out.logits[
+                    idx : idx + 1, pad_len + prompt_len - 1 : -1, :
+                ]
+                pol_logits_steps = pol_out.logits[
+                    idx : idx + 1, pad_len + prompt_len - 1 : -1, :
+                ]
+
+                if ref_logits_steps.numel() == 0:
+                    kl_results.append(0.0)
+                else:
+                    kl_steps = _kl_divergence(pol_logits_steps, ref_logits_steps)
+                    kl_results.append(float(kl_steps.mean().item()))
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return kl_results
 
 
 def evaluate_pass1_maj8_batched(
@@ -107,6 +277,7 @@ def evaluate_pass1_maj8_batched(
     ref_model: Optional[HFModel] = None,
     save_dir: Optional[Path] = None,
     batch_size: int = 8,
+    is_cot8: bool = False,
 ) -> Dict[str, float]:
     """Evaluate pass@1 and maj@8 with batched generation.
 
@@ -117,38 +288,81 @@ def evaluate_pass1_maj8_batched(
         ref_model: Reference model for KL computation
         save_dir: Directory to save results
         batch_size: Batch size for generation (number of examples to process at once)
+        is_cot8: Whether to use 8-shot CoT prompting
     """
     ds = build_test_dataset(cfg, dataset)
     if ds is None:
         return {}
 
-    max_examples = int(cfg.data_collection.max_examples or 0)
-    limit = max_examples if max_examples > 0 else len(ds)
+    from pita.eval.cot_examples import get_8shot_prompt
 
-    total = 0
-    pass1 = 0
-    maj8 = 0
-    sum_kl = 0.0
+    limit = int(getattr(cfg.datasets[dataset], "test_size_cap", 0) or 0)
+    limit = limit if limit > 0 else len(ds)
+    num_samples = int(cfg.evaluation.num_samples)
     has_verifier = hasattr(ds, "is_correct")
-    rows: List[Dict[str, str]] = []
 
-    # Collect examples into batches
     examples = list(islice(ds.iter(), limit))
+    logger.info(
+        f"📊 Evaluating {len(examples)} examples with batch_size={batch_size}, {num_samples} samples each"
+    )
 
     from tqdm import tqdm
 
-    for ex in tqdm(examples, desc=f"Eval:{dataset}"):
-        prompt = ds.hydrate_prompt(ex.question)
+    prompts_data = []
+    total_examples = len(examples)
+    for i, ex in enumerate(tqdm(examples, desc="🔧 Preparing prompts", unit="ex")):
+        remaining = total_examples - (i + 1)
+        if i % 100 == 0 or remaining == 0:
+            logger.info(
+                f"📊 Eval Prep | {i+1}/{total_examples} examples | {remaining} remaining"
+            )
+
+        if is_cot8:
+            prompt = get_8shot_prompt(dataset, ex.question)
+        else:
+            prompt = ds.hydrate_prompt(ex.question)
+
         built = build_instruction_prompt(
             prompt,
             tokenizer=model.tokenizer,
             use_chat_template=model.gen_cfg.use_chat_template,
         )
+        prompts_data.append({"ex": ex, "built": built})
 
-        # Generate 8 samples
-        preds: List[str] = model.generate_n(built, 8)
+    all_prompts = []
+    prompt_to_example = []
+    for idx, item in enumerate(prompts_data):
+        for _ in range(num_samples):
+            all_prompts.append(item["built"])
+            prompt_to_example.append(idx)
 
-        if has_verifier and ds.is_correct(ex.answer, preds[0]):
+    logger.info(f"🔄 Generating {len(all_prompts)} predictions...")
+    all_preds = model.continue_from_context_batch(
+        all_prompts, model.gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+    )
+
+    grouped_preds = [[] for _ in range(len(examples))]
+    for ex_idx, pred in zip(prompt_to_example, all_preds):
+        grouped_preds[ex_idx].append(pred)
+
+    logger.info("\n📊 Computing metrics and KL divergence...")
+    import time
+
+    if isinstance(model, GuidedHFModel):
+        logger.info(
+            "⚠️  KL computation for guided models processes tokens step-by-step - this may take several minutes"
+        )
+    kl_start = time.time()
+    total = 0
+    pass1 = 0
+    maj8 = 0
+    rows: List[Dict[str, str]] = []
+
+    pass1_prompts = []
+    pass1_conts = []
+
+    for item, preds in zip(prompts_data, grouped_preds):
+        if has_verifier and ds.is_correct(item["ex"].answer, preds[0]):
             pass1 += 1
 
         if has_verifier:
@@ -158,29 +372,38 @@ def evaluate_pass1_maj8_batched(
                 top_str, top_cnt = max(counts.items(), key=lambda kv: kv[1])
                 if list(counts.values()).count(top_cnt) == 1:
                     rep_idx = norm.index(top_str)
-                    if ds.is_correct(ex.answer, preds[rep_idx]):
+                    if ds.is_correct(item["ex"].answer, preds[rep_idx]):
                         maj8 += 1
 
         total += 1
-
-        # KL computation
-        try:
-            sum_kl += _compute_traj_kl_for_text(
-                model,
-                ref_model,
-                prompt_text=built,
-                continuation_text=preds[0],
-            )
-        except Exception:
-            sum_kl += 0.0
+        pass1_prompts.append(item["built"])
+        pass1_conts.append(preds[0])
 
         rows.append(
             {
-                "question": ex.question,
-                "answer": ex.answer,
-                **{f"pred_{i+1}": preds[i] for i in range(8)},
+                "question": item["ex"].question,
+                "answer": item["ex"].answer,
+                **{f"pred_{i+1}": preds[i] for i in range(len(preds))},
             }
         )
+
+    kl_values = _compute_traj_kl_batched(
+        model,
+        ref_model,
+        prompt_texts=pass1_prompts,
+        continuation_texts=pass1_conts,
+        batch_size=batch_size,
+    )
+    sum_kl = sum(kl_values)
+    kl_elapsed = time.time() - kl_start
+    logger.info(f"✅ KL computation complete ({kl_elapsed:.1f}s)")
+
+    results = {
+        "pass@1": float(pass1 / max(1, total)),
+        "maj@8": float(maj8 / max(1, total)),
+        "avg_kl": float(sum_kl / max(1, total)),
+        "num_examples": int(total),
+    }
 
     if save_dir is not None:
         ensure_dir(Path(save_dir))
@@ -188,12 +411,15 @@ def evaluate_pass1_maj8_batched(
         ds_out.save_to_disk(str(Path(save_dir) / "eval_predictions.hf"))
         ds_out.to_csv(str(Path(save_dir) / "eval_predictions.csv"))
 
-    return {
-        "pass@1": float(pass1 / max(1, total)),
-        "maj@8": float(maj8 / max(1, total)),
-        "avg_kl": float(sum_kl / max(1, total)),
-        "num_examples": int(total),
-    }
+        # Save results to JSON for caching
+        import json
+
+        results_json = Path(save_dir) / "results.json"
+        with open(results_json, "w") as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"💾 Saved results to {results_json}")
+
+    return results
 
 
 def evaluate_avg_reward_batched(
@@ -230,49 +456,83 @@ def evaluate_avg_reward_batched(
         batch_size=batch_size,
     )
 
-    max_examples = int(cfg.data_collection.max_examples or 0)
-    limit = max_examples if max_examples > 0 else len(ds)
+    limit = int(getattr(cfg.datasets[dataset], "test_size_cap", 0) or 0)
+    limit = limit if limit > 0 else len(ds)
 
-    total = 0
-    sum_reward = 0.0
-    sum_kl = 0.0
-    rows: List[Dict[str, str]] = []
+    # Collect all examples first
+    examples = list(islice(ds.iter(), limit))
+    logger.info(f"📊 Evaluating {len(examples)} examples with batch_size={batch_size}")
 
+    # PHASE 1: Build all prompts
     from tqdm import tqdm
 
-    for ex in tqdm(islice(ds.iter(), limit), total=limit, desc=f"EvalR:{dataset}"):
+    prompts_data = []
+    total_examples = len(examples)
+    for i, ex in enumerate(tqdm(examples, desc="🔧 Preparing prompts", unit="ex")):
+        remaining = total_examples - (i + 1)
+        if i % 100 == 0 or remaining == 0:
+            logger.info(
+                f"📊 Eval Prep | {i+1}/{total_examples} examples | {remaining} remaining"
+            )
+
         prompt = ds.hydrate_prompt(ex.question)
         built = build_instruction_prompt(
             prompt,
             tokenizer=model.tokenizer,
             use_chat_template=model.gen_cfg.use_chat_template,
         )
-        pred: str = model.continue_from_context(
-            built, max_new_tokens=model.gen_cfg.max_new_tokens, greedy=False
-        )
+        prompts_data.append({"ex": ex, "built": built})
 
-        r = float(scorer.score_single(ex.question, pred))
+    # PHASE 2: Batch generate all predictions
+    logger.info("🔄 Generating predictions...")
+    all_prompts = [item["built"] for item in prompts_data]
+    preds = model.continue_from_context_batch(
+        all_prompts, model.gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+    )
+
+    # PHASE 3: Batch score all predictions
+    logger.info("📊 Computing reward scores...")
+    score_pairs = [
+        (item["ex"].question, pred) for item, pred in zip(prompts_data, preds)
+    ]
+    rewards = scorer.score_batch_single(score_pairs)
+
+    # PHASE 4: Compute KL in batches
+    logger.info("📊 Computing KL divergence...")
+    all_prompts = [item["built"] for item in prompts_data]
+    kl_values = _compute_traj_kl_batched(
+        model,
+        ref_model,
+        prompt_texts=all_prompts,
+        continuation_texts=preds,
+        batch_size=batch_size,
+    )
+
+    # PHASE 5: Assemble results
+    total = 0
+    sum_reward = 0.0
+    sum_kl = sum(kl_values)
+    rows: List[Dict[str, str]] = []
+
+    for item, pred, r in zip(prompts_data, preds, rewards):
         sum_reward += r
         total += 1
 
-        try:
-            sum_kl += _compute_traj_kl_for_text(
-                model,
-                ref_model,
-                prompt_text=built,
-                continuation_text=pred,
-            )
-        except Exception:
-            sum_kl += 0.0
-
         rows.append(
             {
-                "question": ex.question,
-                "answer": ex.answer,
+                "question": item["ex"].question,
+                "answer": item["ex"].answer,
                 "pred": pred,
                 "reward": r,
             }
         )
+
+    avg_reward = float(sum_reward / max(1, total))
+    results = {
+        "avg_reward": avg_reward,
+        "avg_kl": float(sum_kl / max(1, total)),
+        "num_examples": int(total),
+    }
 
     if save_dir is not None:
         ensure_dir(Path(save_dir))
@@ -280,12 +540,15 @@ def evaluate_avg_reward_batched(
         ds_out.save_to_disk(str(Path(save_dir) / "eval_predictions.hf"))
         ds_out.to_csv(str(Path(save_dir) / "eval_predictions.csv"))
 
-    avg_reward = float(sum_reward / max(1, total))
-    return {
-        "avg_reward": avg_reward,
-        "avg_kl": float(sum_kl / max(1, total)),
-        "num_examples": int(total),
-    }
+        # Save results to JSON for caching
+        import json
+
+        results_json = Path(save_dir) / "results.json"
+        with open(results_json, "w") as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"💾 Saved results to {results_json}")
+
+    return results
 
 
 def evaluate_parallel(
@@ -295,28 +558,22 @@ def evaluate_parallel(
     ref_model: Optional[HFModel] = None,
     save_dir: Optional[Path] = None,
     use_reward: bool = False,
+    is_cot8: bool = False,
 ) -> Dict[str, float]:
     """Automatically select evaluation method based on GPU availability.
 
     Uses batched evaluation with optimized batch sizes based on GPU memory.
     """
-    gpu_manager = get_gpu_manager()
-
-    # Determine optimal batch size based on GPU memory
-    if gpu_manager.num_gpus > 0:
-        # For 80GB GPUs, use larger batches; for 40GB, use smaller
-        total_memory = gpu_manager.get_gpu_memory(0) / (1024**3)  # GB
-        batch_size = 16 if total_memory >= 60 else 8
-    else:
-        batch_size = 4
-
+    # Use batch size from config
+    batch_size = int(cfg.evaluation.batch_size)
     logger.info(f"Using batch size {batch_size} for evaluation on {dataset}")
 
     if use_reward:
+        # Reward-based evaluation doesn't support CoT currently (as discussed)
         return evaluate_avg_reward_batched(
             cfg, model, dataset, ref_model, save_dir, batch_size
         )
     else:
         return evaluate_pass1_maj8_batched(
-            cfg, model, dataset, ref_model, save_dir, batch_size
+            cfg, model, dataset, ref_model, save_dir, batch_size, is_cot8=is_cot8
         )

@@ -42,3 +42,12 @@ class GRPODataset(Dataset):
     def iter(self) -> Iterator[GRPOSample]:
         for i in range(len(self)):
             yield self[i]
+
+    def save_to_disk(self, path: str | Path) -> None:
+        """Save the underlying HuggingFace dataset to disk."""
+        self.ds.save_to_disk(str(path))
+
+    @classmethod
+    def load_from_disk(cls, path: str | Path) -> "GRPODataset":
+        """Load a GRPODataset from disk."""
+        return cls(path)

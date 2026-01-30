@@ -12,7 +12,13 @@ from itertools import islice
 from pita.core.registry import register_algorithm
 from .base import ValueGuidedAlgorithms
 from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
-from pita.core.io import get_run_root, get_snapshot_paths, merge_and_save_hf
+from pita.core.io import (
+    get_run_root,
+    get_snapshot_paths,
+    merge_and_save_hf,
+    mark_phase_complete,
+    check_phase_complete,
+)
 from pita.core.compute_tracker import get_compute_tracker, reset_compute_tracker
 from pita.trainers import QSharpTrainer
 from datasets import load_from_disk
@@ -36,12 +42,13 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         cls_model: Optional[str] = None,
         run_root: Optional[Any] = None,
     ) -> None:
+        reward_scorer = None
         # For non-verifiable datasets, set up a reward model for scoring
         if dataset in {"TLDR", "IMDBGen"}:
             ds_cfg = cfg.datasets[dataset]
             rm_model = str(ds_cfg.reward_model)
             device = 0 if torch.cuda.is_available() else -1
-            self._reward = RewardScorer(
+            reward_scorer = RewardScorer(
                 rm_model,
                 bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
                 bt_beta=float(cfg.data_collection.bradley_terry_beta),
@@ -49,6 +56,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
                 dtype=str(cfg.system.dtype),
                 batch_size=int(cfg.data_collection.reward_batch_size),
             )
+            self._reward = reward_scorer
 
         snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
             self.algo_key, dataset, family, round_idx, run_root=run_root
@@ -59,7 +67,7 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         ref_hf = self._build_model(cfg, ref_model)
 
         if int(round_idx) > 0 and cls_model is not None:
-            verifiable = {"AIME", "GSM8K", "MATH"}
+            verifiable = {"AIME2025", "AIME2024", "AIME22to24", "GSM8K", "MATH"}
             loss_type = "bce" if dataset in verifiable else "mle"
             prev_classifier = ValueClassifier(
                 cls_model,
@@ -97,66 +105,114 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         gen_cfg = model.gen_cfg
 
         samples_per_example = int(cfg.data_collection.samples_per_example)
+        batch_size = int(cfg.algos[self.algo_key].batch_size)
+        chunk_size = int(getattr(cfg.data_collection, "chunk_size", 100))
 
-        records: List[Dict[str, Any]] = []
-        max_examples = int(cfg.data_collection.max_examples or 0)
-        limit = max_examples if max_examples > 0 else len(ds)
-        for ex in tqdm(
-            islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
-        ):
+        limit = int(getattr(cfg.datasets[dataset], "train_size_cap", 0) or 0)
+        limit = limit if limit > 0 else len(ds)
+
+        # Collect all examples (lightweight - just metadata)
+        examples = []
+        for ex in islice(ds.iter(), limit):
             prompt = ds.hydrate_prompt(ex.question)
-            rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
+            examples.append({"ex": ex, "prompt": prompt})
 
-            built_prompt = rollout["prompt"]
-            prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
-            context_token_ids = rollout["context_ids"].tolist()
-            full_token_count = len(context_token_ids)
-            rollout_token_count = full_token_count - prompt_token_count
+        logger.info(
+            f"🔄 Processing {len(examples)} examples in chunks of {chunk_size} (batch_size={batch_size})"
+        )
 
-            if rollout_token_count < 2:
+        all_records: List[Dict[str, Any]] = []
+
+        # Process examples in chunks to reduce peak memory usage
+        for chunk_start in range(0, len(examples), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(examples))
+            chunk_examples = examples[chunk_start:chunk_end]
+
+            logger.info(
+                f"📦 Processing chunk {chunk_start//chunk_size + 1}/{(len(examples) + chunk_size - 1)//chunk_size} "
+                f"(examples {chunk_start+1}-{chunk_end}/{len(examples)})"
+            )
+
+            # PHASE 1: Batch roll_in calls for this chunk
+            prompts = [item["prompt"] for item in chunk_examples]
+            rollouts = model.roll_in_batch(
+                prompts, gen_cfg.max_new_tokens, batch_size=batch_size
+            )
+
+            # PHASE 2: Prepare contexts for continuation
+            contexts_to_continue = []
+            for item, rollout in zip(chunk_examples, rollouts):
+                built_prompt = rollout["prompt"]
+                prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
+                context_token_ids = rollout["context_ids"].tolist()
+                full_token_count = len(context_token_ids)
+                rollout_token_count = full_token_count - prompt_token_count
+
+                if rollout_token_count < 2:
+                    continue
+
+                for _ in range(samples_per_example):
+                    cutoff_tokens = random.randint(1, rollout_token_count - 1)
+                    context_prefix_ids = context_token_ids[
+                        : prompt_token_count + cutoff_tokens
+                    ]
+                    context_text = model.tokenizer.decode(
+                        context_prefix_ids, skip_special_tokens=True
+                    )
+                    solution_prefix_ids = context_prefix_ids[prompt_token_count:]
+                    solution_prefix_text = model.tokenizer.decode(
+                        solution_prefix_ids, skip_special_tokens=True
+                    )
+                    remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
+
+                    if remaining_token_budget >= 1:
+                        contexts_to_continue.append(
+                            {
+                                "ex": item["ex"],
+                                "prompt": item["prompt"],
+                                "context_text": context_text,
+                                "solution_prefix_text": solution_prefix_text,
+                                "cutoff_tokens": cutoff_tokens,
+                                "remaining_token_budget": remaining_token_budget,
+                            }
+                        )
+
+            if not contexts_to_continue:
                 logger.info(
-                    "Skipping example due to short rollout: dataset={} family={} prompt_tokens={} rollout_tokens={}",
-                    dataset,
-                    str(family),
-                    prompt_token_count,
-                    rollout_token_count,
+                    f"⏭️  Chunk {chunk_start//chunk_size + 1}: No valid contexts, skipping"
                 )
+                del rollouts
                 continue
 
-            for _ in range(samples_per_example):
-                cutoff_tokens = random.randint(1, rollout_token_count - 1)
+            # PHASE 3: Batch continue_from_context calls
+            all_contexts = [item["context_text"] for item in contexts_to_continue]
+            min_remaining_tokens = min(
+                item["remaining_token_budget"] for item in contexts_to_continue
+            )
 
-                context_prefix_ids = context_token_ids[
-                    : prompt_token_count + cutoff_tokens
-                ]
-                context_text = model.tokenizer.decode(
-                    context_prefix_ids, skip_special_tokens=True
-                )
-                solution_prefix_ids = context_prefix_ids[prompt_token_count:]
-                solution_prefix_text = model.tokenizer.decode(
-                    solution_prefix_ids, skip_special_tokens=True
-                )
+            greedy_continuations = model.continue_from_context_batch(
+                all_contexts, min_remaining_tokens, greedy=True, batch_size=batch_size
+            )
+            sampled_continuations = model.continue_from_context_batch(
+                all_contexts, min_remaining_tokens, greedy=False, batch_size=batch_size
+            )
 
-                remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
-                y_ref = model.continue_from_context(
-                    context_text, max_new_tokens=remaining_token_budget, greedy=True
-                )
-                y_sample = model.continue_from_context(
-                    context_text, max_new_tokens=remaining_token_budget, greedy=False
-                )
+            # PHASE 4: Assemble samples and score
+            for ctx, y_ref, y_sample in zip(
+                contexts_to_continue, greedy_continuations, sampled_continuations
+            ):
+                y_a = ctx["solution_prefix_text"] + y_ref
+                y_b = ctx["solution_prefix_text"] + y_sample
 
-                y_a = solution_prefix_text + y_ref
-                y_b = solution_prefix_text + y_sample
+                score_a, score_b, preferred = self.score_samples(ctx["ex"], y_a, y_b)
 
-                score_a, score_b, preferred = self.score_samples(ex, y_a, y_b)
-
-                records.append(
+                all_records.append(
                     {
-                        "question": ex.question,
-                        "answer": ex.answer,
-                        "prompt": prompt,
-                        "t": cutoff_tokens,
-                        "context": prompt + solution_prefix_text,
+                        "question": ctx["ex"].question,
+                        "answer": ctx["ex"].answer,
+                        "prompt": ctx["prompt"],
+                        "t": ctx["cutoff_tokens"],
+                        "context": ctx["prompt"] + ctx["solution_prefix_text"],
                         "y_a": y_a,
                         "y_b": y_b,
                         "score_a": score_a,
@@ -165,10 +221,29 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
                     }
                 )
 
-        if not records:
+            # Clear chunk data to free memory
+            del rollouts, contexts_to_continue, all_contexts
+            del greedy_continuations, sampled_continuations
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            logger.info(
+                f"✅ Chunk {chunk_start//chunk_size + 1} complete: {len(all_records)} total records so far"
+            )
+
+        if not all_records:
+            if reward_scorer is not None:
+                reward_scorer.cleanup()
             return
-        new_ds = Dataset.from_list(records)
+
+        logger.info(f"🎉 All chunks processed: {len(all_records)} total records")
+        new_ds = Dataset.from_list(all_records)
         merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
+
+        if reward_scorer is not None:
+            reward_scorer.cleanup()
+            if hasattr(self, "_reward"):
+                del self._reward
 
     def resolve_ref_for_round(
         self,
@@ -203,75 +278,99 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         )
         if not hf_dir.exists():
             raise FileNotFoundError(f"Missing QSharp dataset: {hf_dir}")
-        ds = load_from_disk(str(hf_dir))
-
-        ref = self._build_model(cfg, ref_model)
-        verifiable = {"AIME", "GSM8K", "MATH"}
-        loss_type = "bce" if dataset in verifiable else "mle"
-        classifier = ValueClassifier(
-            cls_model,
-            tokenizer=ref.tokenizer,
-            device=ref.model.device,
-            loss_type=loss_type,
-            num_atoms=int(self.cfg.num_atoms),
-            V_min=float(self.cfg.V_min),
-            V_max=float(self.cfg.V_max),
-            attn_impl=str(cfg.system.attn_impl),
-            dtype=str(cfg.system.amp_dtype),
-            gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
-        )
-        self.maybe_load_classifier_from_prev_round(
-            classifier,
-            run_root=run_root,
-            dataset=dataset,
-            family=family,
-            round_idx=round_idx,
-            device=ref.model.device,
-        )
-
-        trainer = QSharpTrainer(
-            classifier=classifier,
-            tokenizer=ref.tokenizer,
-            batch_size=int(self.cfg.batch_size),
-            max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
-            num_workers=int(self.cfg.num_workers),
-            lr=float(self.cfg.lr),
-            weight_decay=float(self.cfg.weight_decay),
-            grad_clip=float(self.cfg.grad_clip),
-            pad_token_id=ref.pad_token_id,
-            micro_batch_size=int(cfg.training.micro_batch_size),
-            amp_dtype=str(cfg.system.amp_dtype),
-            clear_cache_interval=int(cfg.system.clear_cache_interval),
-        )
-        # Convert dataset rows to classifier training examples if needed
-        # Expecting keys: input_ids, target_ids, rewards, loss_weights
-        sample = ds[0] if len(ds) > 0 else None
-        need_convert = sample is not None and not all(
-            k in sample for k in ("input_ids", "target_ids", "rewards", "loss_weights")
-        )
-        if need_convert:
-            ds = convert_qsharp_rows_to_classifier_dataset(
-                ds,
-                tokenizer=ref.tokenizer,
-                use_chat_template=ref.gen_cfg.use_chat_template,
-            )
-
-        loader = trainer.create_loader(ds)
-        with tracker.track_phase(f"training_{dataset}"):
-            stats = trainer.train(loader, num_epochs=int(self.cfg.epochs))
 
         ckpt_dir = self.get_ckpt_dir(run_root, dataset, family, round_idx)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(classifier.state_dict(), str(ckpt_dir / "classifier.pt"))
 
-        # Free memory before loading for evaluation
-        logger.info("🧹 Clearing trainer, loader, and classifier before evaluation...")
-        del trainer, loader, ds, classifier
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+        ref = self._build_model(cfg, ref_model)
+        verifiable = {"AIME2025", "AIME2024", "AIME22to24", "GSM8K", "MATH"}
+        loss_type = "bce" if dataset in verifiable else "mle"
 
-        # Reload classifier from checkpoint for evaluation
+        # Phase 1: Classifier Training
+        if check_phase_complete(
+            "classifier_training", self.algo_key, dataset, family, round_idx, run_root
+        ):
+            logger.info(
+                "⏭️  Phase 1: Classifier training already complete, loading checkpoint..."
+            )
+            stats = {"steps": 0, "loss": 0.0}
+        else:
+            logger.info("🔄 Phase 1: Training classifier...")
+            ds = load_from_disk(str(hf_dir))
+
+            classifier = ValueClassifier(
+                cls_model,
+                tokenizer=ref.tokenizer,
+                device=ref.model.device,
+                loss_type=loss_type,
+                num_atoms=int(self.cfg.num_atoms),
+                V_min=float(self.cfg.V_min),
+                V_max=float(self.cfg.V_max),
+                attn_impl=str(cfg.system.attn_impl),
+                dtype=str(cfg.system.amp_dtype),
+                gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
+            )
+            self.maybe_load_classifier_from_prev_round(
+                classifier,
+                run_root=run_root,
+                dataset=dataset,
+                family=family,
+                round_idx=round_idx,
+                device=ref.model.device,
+            )
+
+            trainer = QSharpTrainer(
+                classifier=classifier,
+                tokenizer=ref.tokenizer,
+                batch_size=int(self.cfg.batch_size),
+                max_batch_num_tokens=int(getattr(self.cfg, "max_batch_num_tokens", -1)),
+                num_workers=int(self.cfg.num_workers),
+                lr=float(self.cfg.lr),
+                weight_decay=float(self.cfg.weight_decay),
+                grad_clip=float(self.cfg.grad_clip),
+                pad_token_id=ref.pad_token_id,
+                micro_batch_size=int(cfg.training.micro_batch_size),
+                amp_dtype=str(cfg.system.amp_dtype),
+                clear_cache_interval=int(cfg.system.clear_cache_interval),
+            )
+            # Convert dataset rows to classifier training examples if needed
+            sample = ds[0] if len(ds) > 0 else None
+            need_convert = sample is not None and not all(
+                k in sample
+                for k in ("input_ids", "target_ids", "rewards", "loss_weights")
+            )
+            if need_convert:
+                ds = convert_qsharp_rows_to_classifier_dataset(
+                    ds,
+                    tokenizer=ref.tokenizer,
+                    use_chat_template=ref.gen_cfg.use_chat_template,
+                )
+
+            loader = trainer.create_loader(ds)
+            with tracker.track_phase(f"training_{dataset}"):
+                stats = trainer.train(loader, num_epochs=int(self.cfg.epochs))
+
+            torch.save(classifier.state_dict(), str(ckpt_dir / "classifier.pt"))
+            mark_phase_complete(
+                "classifier_training",
+                self.algo_key,
+                dataset,
+                family,
+                round_idx,
+                run_root,
+            )
+
+            # Free memory before loading for evaluation
+            logger.info(
+                "🧹 Clearing trainer, loader, and classifier before evaluation..."
+            )
+            del trainer, loader, ds, classifier
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+        # Phase 2: Evaluation - Load classifier from checkpoint
+        logger.info("🔮 Phase 2: Evaluating with trained classifier...")
         reloaded = ValueClassifier(
             cls_model,
             tokenizer=ref.tokenizer,
@@ -308,13 +407,24 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
                 except Exception:
                     guided.guidance.eta = float(self.cfg.guidance.eta)
                 save_dir = output_dir / f"eval_{eval_ds}_eta{guided.guidance.eta}"
+                eval_batch = getattr(self.cfg, "eval_batch_size", None)
                 if eval_ds in {"TLDR", "IMDBGen"}:
                     metrics = evaluate_avg_reward(
-                        cfg, guided, eval_ds, ref_model=ref, save_dir=save_dir
+                        cfg,
+                        guided,
+                        eval_ds,
+                        ref_model=ref,
+                        save_dir=save_dir,
+                        batch_size=eval_batch,
                     )
                 else:
                     metrics = evaluate_pass1_maj8(
-                        cfg, guided, eval_ds, ref_model=ref, save_dir=save_dir
+                        cfg,
+                        guided,
+                        eval_ds,
+                        ref_model=ref,
+                        save_dir=save_dir,
+                        batch_size=eval_batch,
                     )
                 by_eta[str(guided.guidance.eta)] = metrics
                 # Clear memory after each evaluation to prevent fragmentation

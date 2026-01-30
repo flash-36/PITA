@@ -58,43 +58,81 @@ class GRPOAlgorithm(PostTrainingAlgorithms):
         )
 
         samples_per_prompt = int(self.cfg.samples_per_prompt)
-        records: List[Dict[str, Any]] = []
-        max_examples = int(cfg.data_collection.max_examples or 0)
-        limit = max_examples if max_examples > 0 else len(ds)
+        batch_size = int(cfg.algos[self.algo_key].batch_size)
+        limit = int(getattr(cfg.datasets[dataset], "train_size_cap", 0) or 0)
+        limit = limit if limit > 0 else len(ds)
 
-        for group_id, ex in enumerate(
-            tqdm(
-                islice(ds.iter(), limit), total=limit, desc=f"{self.algo_key}:{dataset}"
-            )
-        ):
+        # Collect all examples first
+        examples = []
+        for group_id, ex in enumerate(islice(ds.iter(), limit)):
             prompt = ds.hydrate_prompt(ex.question)
             built = build_instruction_prompt(
                 prompt,
                 tokenizer=model.tokenizer,
                 use_chat_template=model.gen_cfg.use_chat_template,
             )
+            examples.append(
+                {
+                    "ex": ex,
+                    "prompt": prompt,
+                    "built": built,
+                    "group_id": group_id,
+                }
+            )
 
+        logger.info(
+            f"🔄 Processing {len(examples)} examples with batch_size={batch_size}"
+        )
+
+        # PHASE 1: Build all prompts
+        prompts_to_generate = []
+        for item in examples:
             for _ in range(samples_per_prompt):
-                response = model.continue_from_context(
-                    built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
-                )
-                reward = self._reward.score_single(ex.question, response)
+                prompts_to_generate.append(item)
 
-                records.append(
-                    {
-                        "question": ex.question,
-                        "answer": ex.answer,
-                        "prompt": prompt,
-                        "response": response,
-                        "reward": float(reward),
-                        "group_id": int(group_id),
-                    }
-                )
+        logger.info(
+            f"🔄 Prepared {len(prompts_to_generate)} prompts, now batching generations..."
+        )
+
+        # PHASE 2: Batch generate all responses
+        all_prompts = [item["built"] for item in prompts_to_generate]
+        responses = model.continue_from_context_batch(
+            all_prompts, gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+        )
+
+        # PHASE 3: Batch score all responses
+        logger.info(f"✅ Generated {len(responses)} responses, now batch scoring...")
+        score_pairs = [
+            (item["ex"].question, response)
+            for item, response in zip(prompts_to_generate, responses)
+        ]
+        rewards = self._reward.score_batch_single(score_pairs)
+
+        # PHASE 4: Assemble records
+        records: List[Dict[str, Any]] = []
+        for item, response, reward in zip(prompts_to_generate, responses, rewards):
+            records.append(
+                {
+                    "question": item["ex"].question,
+                    "answer": item["ex"].answer,
+                    "prompt": item["prompt"],
+                    "response": response,
+                    "reward": float(reward),
+                    "group_id": int(item["group_id"]),
+                }
+            )
 
         if not records:
+            if hasattr(self, "_reward") and self._reward is not None:
+                self._reward.cleanup()
+                del self._reward
             return
         new_ds = Dataset.from_list(records)
         merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
+
+        if hasattr(self, "_reward") and self._reward is not None:
+            self._reward.cleanup()
+            del self._reward
 
     def run(
         self,

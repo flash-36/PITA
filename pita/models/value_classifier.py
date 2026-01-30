@@ -61,7 +61,6 @@ class ValueClassifier(nn.Module):
             self.atoms = torch.linspace(self.V_min, self.V_max, self.num_atoms).float()
 
         out_dim = 1 if self.loss_type != "mle" else self.num_atoms
-        # Ensure the classifier head matches the backbone parameter dtype/device
         backbone_param = next(self.backbone.parameters())
         self.score = nn.Linear(
             hidden_size,
@@ -71,7 +70,6 @@ class ValueClassifier(nn.Module):
             dtype=backbone_param.dtype,
         )
         if device is not None:
-            # Keep explicit device move for safety in case backbone moved after init
             self.score = self.score.to(device)
 
     @property
@@ -155,81 +153,83 @@ class ValueClassifier(nn.Module):
         use_cache: Optional[bool] = None,
         past_key_values: Optional[Any] = None,
     ) -> Any:
-        pad_id = getattr(self.tokenizer, "pad_token_id", 0)
+        """Score candidate tokens for guided generation using a custom attention mask.
+
+        This avoids KV cache expansion by treating all top_k candidates as a single
+        batch with a custom 4D mask that prevents them from attending to each other.
+        """
         bs, seq_len = input_ids.shape
         top_k = logit_indices.size(1)
 
-        chunk_size = 10
-        if top_k <= chunk_size:
-            chunk_size = top_k
-
-        all_logits = []
-        saved_past_key_values = None
-
-        for chunk_start in range(0, top_k, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, top_k)
-            chunk_indices = logit_indices[:, chunk_start:chunk_end]
-            chunk_k = chunk_indices.size(1)
-
-            base = input_ids
-            expanded = (
-                base.unsqueeze(1)
-                .expand(bs, chunk_k, seq_len)
-                .contiguous()
-                .view(bs * chunk_k, seq_len)
-            )
-            cand = chunk_indices.reshape(bs * chunk_k, 1)
-            expanded_ids = torch.cat([expanded, cand.to(expanded.device)], dim=1)
-            if attention_mask is not None:
-                base_mask = (
-                    attention_mask.unsqueeze(1)
-                    .expand(bs, chunk_k, seq_len)
-                    .contiguous()
-                    .view(bs * chunk_k, seq_len)
-                )
-                expanded_mask = torch.cat(
-                    [
-                        base_mask,
-                        torch.ones(
-                            (bs * chunk_k, 1),
-                            dtype=base_mask.dtype,
-                            device=base_mask.device,
-                        ),
-                    ],
-                    dim=1,
-                )
-            else:
-                expanded_mask = expanded_ids.ne(pad_id).long()
-
-            out = self.backbone(
-                input_ids=expanded_ids,
-                attention_mask=expanded_mask,
-                use_cache=use_cache,
-                past_key_values=past_key_values,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-            last_hidden = out.hidden_states[-1][:, -1]
-            chunk_logits = self.score(last_hidden)
-
-            if self.loss_type == "mle":
-                chunk_logits = chunk_logits.view(bs, chunk_k, self.num_atoms)
-            else:
-                chunk_logits = chunk_logits.view(bs, chunk_k)
-
-            all_logits.append(chunk_logits)
-
-            if use_cache and chunk_start == 0:
-                saved_past_key_values = getattr(out, "past_key_values", None)
-
-            del out, last_hidden, expanded_ids, expanded_mask
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        cand_logits = torch.cat(all_logits, dim=1)
-        return SimpleNamespace(
-            logits=cand_logits, past_key_values=saved_past_key_values
+        # Phase 1: Process prefix to get prefix KV cache
+        prefix_out = self.backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=True,
+            past_key_values=past_key_values,
+            output_hidden_states=False,
+            return_dict=True,
         )
+        prefix_pkv = prefix_out.past_key_values
+        del prefix_out
+
+        # Determine past_len
+        if prefix_pkv is None:
+            past_len = 0
+        elif hasattr(prefix_pkv, "get_seq_length"):
+            past_len = prefix_pkv.get_seq_length()
+        else:
+            try:
+                past_len = prefix_pkv[0][0].shape[-2]
+            except (IndexError, TypeError, AttributeError):
+                past_len = seq_len
+
+        # Phase 2: Score all candidates in parallel using shared prefix cache
+        candidate_ids = logit_indices.to(self.device)
+        candidate_positions = torch.full(
+            (bs, top_k), past_len, dtype=torch.long, device=self.device
+        )
+
+        # Build custom 4D mask: [bs, 1, top_k, past_len + top_k]
+        # Each candidate attends to all prefix tokens but ONLY itself in the candidate set
+        if attention_mask is not None:
+            prefix_mask = attention_mask.unsqueeze(1).expand(bs, top_k, past_len)
+        else:
+            prefix_mask = torch.ones(
+                (bs, top_k, past_len), device=self.device, dtype=torch.long
+            )
+
+        candidate_mask = (
+            torch.eye(top_k, device=self.device, dtype=torch.long)
+            .unsqueeze(0)
+            .expand(bs, top_k, top_k)
+        )
+        full_mask = torch.cat([prefix_mask, candidate_mask], dim=2)
+
+        dtype = self.backbone.dtype
+        full_mask = full_mask.unsqueeze(1).to(dtype=dtype)
+        full_mask = (1.0 - full_mask) * torch.finfo(dtype).min
+
+        # Score candidates
+        cand_out = self.backbone(
+            input_ids=candidate_ids,
+            attention_mask=full_mask,
+            position_ids=candidate_positions,
+            use_cache=False,
+            past_key_values=prefix_pkv,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+        last_hidden = cand_out.hidden_states[-1]
+        logits = self.score(last_hidden)
+
+        if self.loss_type == "mle":
+            logits = logits.view(bs, top_k, self.num_atoms)
+        else:
+            logits = logits.view(bs, top_k)
+
+        return SimpleNamespace(logits=logits, past_key_values=prefix_pkv)
 
     def forward(
         self,

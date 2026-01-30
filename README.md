@@ -22,3 +22,19 @@ The parallel runner automatically:
 - Works seamlessly with 1 GPU or multiple GPUs
 
 Hydra will create an output directory at `outputs/<date>/<experiment-name>-<time>/`.
+
+## Resume Failed/Interrupted Runs
+
+If a run fails or is interrupted, you can resume from where it left off:
+
+```bash
+python run_parallel.py resume_from=outputs/2025-10-20/my_experiment-14-30-00
+```
+
+### To reproduce results from the paper:
+
+```bash
+sh run_experiments.sh
+```
+
+

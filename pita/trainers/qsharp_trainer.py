@@ -209,14 +209,14 @@ class QSharpTrainer:
         if not hasattr(self, "_last_logged_batch") or self._last_logged_batch != len(
             batch
         ):
-            capped_at = (
+            effective_len = (
                 min(max_len_in_batch, self.max_length)
                 if self.max_length > 0
                 else max_len_in_batch
             )
             logger.debug(
                 f"QSharp Batch Info: batch_size={len(batch)}, max_seq_len={max_len_in_batch}, "
-                f"capped_at={capped_at}"
+                f"padded_to={effective_len}"
             )
             self._last_logged_batch = len(batch)
 
@@ -272,10 +272,15 @@ class QSharpTrainer:
         start_time = time.perf_counter()
         epoch_bar = tqdm(range(int(num_epochs)), desc="Q#:epochs")
         for e in epoch_bar:
+            total_batches = len(loader)
             batch_bar = tqdm(
                 loader, desc=f"Q#:epoch {e + 1}/{int(num_epochs)}", leave=False
             )
-            for batch in batch_bar:
+            for i, batch in enumerate(batch_bar):
+                remaining = total_batches - (i + 1)
+                if i % 10 == 0 or remaining == 0:
+                    logger.info(f"⏳ Epoch {e+1}/{num_epochs} | Batch {i+1}/{total_batches} | {remaining} batches remaining")
+                
                 batch = {
                     k: (
                         v.to(self.classifier.device, non_blocking=True)

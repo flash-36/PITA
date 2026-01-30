@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torch.amp import autocast, GradScaler
+from loguru import logger
 
 from .pairwise import PairwiseTrainerBase
 from pita.models.hf import HFModel
@@ -175,12 +176,20 @@ class DPOTrainer(PairwiseTrainerBase):
             smp = getattr(loader, "sampler", None)
             if hasattr(smp, "set_epoch"):
                 smp.set_epoch(e)
+
+            total_batches = len(loader)
             batch_bar = tqdm(
                 loader,
                 desc=f"DPO:epoch {e + 1}/{total_epochs}",
                 leave=False,
             )
-            for batch in batch_bar:
+            for i, batch in enumerate(batch_bar):
+                remaining = total_batches - (i + 1)
+                if i % 10 == 0 or remaining == 0:
+                    logger.info(
+                        f"⏳ Epoch {e+1}/{total_epochs} | Batch {i+1}/{total_batches} | {remaining} batches remaining"
+                    )
+
                 # Optional micro-batching at DPO step granularity
                 if (
                     self.micro_batch_size

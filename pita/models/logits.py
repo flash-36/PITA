@@ -32,58 +32,64 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
         self.loss_type = getattr(value_classifier, "loss_type", "bce")
         self.use_cache = bool(use_cache)
         self.classifier_state = {
-            "input_ids": None,
             "attention_mask": None,
-            "use_cache": self.use_cache,
             "past_key_values": None,
-            "first_pass": True,
+            "prefix_len": 0,
         }
 
     def reset_classifier_state(self) -> None:
         self.classifier_state = {
-            "input_ids": None,
             "attention_mask": None,
-            "use_cache": self.use_cache,
             "past_key_values": None,
-            "first_pass": True,
+            "prefix_len": 0,
         }
 
     @torch.no_grad()
     def _get_classifier_values(
         self, input_ids: torch.Tensor, top_k_indices: torch.Tensor
     ) -> torch.Tensor:
-        if self.classifier_state["first_pass"]:
-            self.classifier_state["first_pass"] = False
-            self.classifier_state["input_ids"] = input_ids
+        bs, current_len = input_ids.shape
+        
+        if self.classifier_state["prefix_len"] == 0:
+            # First pass: process full prompt
             pad_token_id = self.ref_model_tokenizer.pad_token_id
             attention_mask = input_ids.ne(pad_token_id).long()
-            self.classifier_state["attention_mask"] = attention_mask.to(input_ids.dtype)
+            ids_to_process = input_ids
         else:
+            # Subsequent passes: only process the new token(s)
+            prev_len = self.classifier_state["prefix_len"]
+            new_tokens = input_ids[:, prev_len:]
+            # Extend attention mask
             attention_mask = torch.cat(
                 [
                     self.classifier_state["attention_mask"],
-                    torch.ones_like(input_ids[:, -1:], dtype=torch.long),
+                    torch.ones(
+                        (bs, new_tokens.shape[1]),
+                        dtype=self.classifier_state["attention_mask"].dtype,
+                        device=self.classifier_state["attention_mask"].device,
+                    ),
                 ],
                 dim=1,
             )
-            if not self.classifier_state["use_cache"]:
-                input_ids = torch.cat(
-                    [self.classifier_state["input_ids"], input_ids[:, -1:]], dim=1
-                )
+            if self.use_cache:
+                ids_to_process = new_tokens
             else:
-                input_ids = input_ids[:, -1:]
-            self.classifier_state["input_ids"] = input_ids
-            self.classifier_state["attention_mask"] = attention_mask
+                ids_to_process = input_ids
 
         outputs = self.value_classifier.score_candidates(
-            input_ids=input_ids,
-            attention_mask=self.classifier_state["attention_mask"],
-            use_cache=self.classifier_state["use_cache"],
+            input_ids=ids_to_process,
+            attention_mask=attention_mask,
+            use_cache=self.use_cache,
             logit_indices=top_k_indices,
-            past_key_values=self.classifier_state["past_key_values"],
+            past_key_values=self.classifier_state["past_key_values"] if self.use_cache else None,
         )
-        if self.classifier_state["use_cache"]:
+        
+        # Update state for next call
+        self.classifier_state["attention_mask"] = attention_mask
+        self.classifier_state["prefix_len"] = current_len
+        if self.use_cache:
             self.classifier_state["past_key_values"] = outputs.past_key_values
+            
         return outputs.logits
 
     def _modify_top_k(
@@ -120,11 +126,9 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
             if atoms.device != log_pmfs.device:
                 atoms = atoms.to(log_pmfs.device)
             logit_offset = torch.logsumexp(log_pmfs + self.eta * atoms, dim=-1)
-            logit_offset = logit_offset - logit_offset.min(dim=-1, keepdim=True).values
             logit_offset = torch.nan_to_num(
                 logit_offset, nan=0.0, posinf=0.0, neginf=0.0
             )
-            # Match dtype with scores to avoid scatter_add dtype mismatch
             logit_offset = logit_offset.to(dtype=scores.dtype)
             return self._modify_top_k(scores, logit_offset, top_k_indices)
 
@@ -136,7 +140,6 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
             logit_offset = torch.nan_to_num(
                 logit_offset, nan=0.0, posinf=0.0, neginf=0.0
             )
-            # Match dtype with scores to avoid scatter_add dtype mismatch
             logit_offset = logit_offset.to(dtype=scores.dtype)
             return self._modify_top_k(scores, logit_offset, top_k_indices)
 
@@ -147,7 +150,6 @@ class CustomValueGuidedLogitProcessor(LogitsProcessor):
             logit_offset = torch.nan_to_num(
                 logit_offset, nan=0.0, posinf=0.0, neginf=0.0
             )
-            # Match dtype with scores to avoid scatter_add dtype mismatch
             logit_offset = logit_offset.to(dtype=scores.dtype)
             return self._modify_top_k(scores, logit_offset, top_k_indices)
 

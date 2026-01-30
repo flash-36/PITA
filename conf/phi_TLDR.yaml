@@ -1,0 +1,169 @@
+experiment:
+  name: Phi_TLDR_Experiment
+  seed: 42
+rounds_of_training: 1
+resume_from: null
+system:
+  dtype: bfloat16
+  amp_dtype: bfloat16
+  attn_impl: sdpa
+  clear_cache_interval: 10
+generation:
+  max_new_tokens: 4096
+  temperature: 0.8
+  top_p: 0.9
+  use_chat_template: true
+training:
+  micro_batch_size: 4
+  gradient_checkpointing: true
+  datasets:
+  - TLDR
+data_collection:
+  samples_per_example: 4
+  seed: 42
+  reward_batch_size: 64
+  chunk_size: 8
+  bradley_terry_sampling: true
+  bradley_terry_beta: 1.0
+evaluation:
+  etas:
+  - 0.25
+  - 0.5
+  - 1.0
+  - 4.0
+  num_samples: 8
+  batch_size: 16
+  kl_sample_ratio: 0.1
+  datasets_by_train:
+    TLDR:
+    - TLDR
+parallel_generation: false
+use_parallel_execution: true
+algos:
+  PITA:
+    epochs: 10
+    batch_size: 2
+    eval_batch_size: 4
+    max_batch_num_tokens: 16384
+    num_workers: 4
+    lr: 2.0e-05
+    weight_decay: 0.01
+    grad_clip: 1.0
+    loss_type: bce
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
+    guidance:
+      eta: 1.0
+      mode: bernoulli
+      top_k: 20
+      use_cache: true
+  QSharp:
+    epochs: 10
+    batch_size: 2
+    eval_batch_size: 4
+    max_batch_num_tokens: 16384
+    num_workers: 4
+    lr: 2.0e-05
+    weight_decay: 0.01
+    grad_clip: 1.0
+    loss_type: bce
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
+    guidance:
+      eta: 1.0
+      mode: bernoulli
+      top_k: 20
+      use_cache: true
+  QSharp-HF:
+    epochs: 10
+    batch_size: 2
+    eval_batch_size: 4
+    max_batch_num_tokens: 16384
+    num_workers: 4
+    lr: 2.0e-05
+    weight_decay: 0.01
+    grad_clip: 1.0
+    loss_type: mle
+    num_atoms: 11
+    V_min: 0.0
+    V_max: 1.0
+    guidance:
+      eta: 1.0
+      mode: expectation
+      top_k: 20
+      use_cache: true
+model_pairs:
+- phi
+datasets:
+  AIME2025:
+    train_size_cap: 0
+    test_size_cap: 0
+    train_hf_config: AIME2025-II
+    train_split: test
+    question_key: question
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: AIME2025-II
+    test_split: heldout
+  AIME2024:
+    train_size_cap: 0
+    test_size_cap: 0
+    train_hf_config: default
+    train_split: train
+    question_key: problem
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: default
+    test_split: heldout
+  GSM8K:
+    train_size_cap: 0
+    test_size_cap: 0
+    train_hf_config: main
+    train_split: train
+    question_key: question
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: main
+    test_split: test
+  TLDR:
+    train_size_cap: 0
+    test_size_cap: 0
+    train_hf_config: ''
+    train_split: train
+    question_key: prompt
+    answer_key: completion
+    reward_model: OpenAssistant/reward-model-deberta-v3-large-v2
+    test_hf_config: ''
+    test_split: test
+  IMDBGen:
+    train_size_cap: 0
+    test_size_cap: 5000
+    train_hf_config: ''
+    train_split: train
+    question_key: text
+    answer_key: label
+    reward_model: lvwerra/distilbert-imdb
+    test_hf_config: ''
+    test_split: test
+  MATH:
+    train_size_cap: 0
+    test_size_cap: 0
+    train_hf_config: ''
+    train_split: test
+    question_key: problem
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: ''
+    test_split: heldout
+  AIME22to24:
+    train_size_cap: 0
+    test_size_cap: 0
+    train_hf_config: default
+    train_split: train
+    question_key: problem
+    answer_key: answer
+    reward_model: weqweasdas/RM-Gemma-2B
+    test_hf_config: default
+    test_split: heldout

@@ -147,9 +147,28 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         run_root: Optional[Path] = None,
     ) -> None:
         """Generate data using parallel multi-GPU processing when available."""
+        from pita.core.io import (
+            get_checkpoint_dir,
+            load_all_checkpoints,
+            clear_checkpoints,
+        )
+
+        if run_root is None:
+            run_root = get_run_root()
+
         snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
             self.algo_key, dataset, family, round_idx, run_root=run_root
         )
+
+        checkpoint_dir = get_checkpoint_dir(
+            self.algo_key, dataset, family, round_idx, run_root
+        )
+
+        existing_records = load_all_checkpoints(checkpoint_dir)
+        if existing_records:
+            logger.info(
+                f"💾 Found {len(existing_records)} records from previous checkpoints"
+            )
 
         gpu_manager = get_gpu_manager()
         parallel_enabled = (
@@ -157,28 +176,34 @@ class ValueGuidedAlgorithms(AlgorithmBase):
             if hasattr(cfg, "parallel_generation")
             else True
         )
-        use_parallel = gpu_manager.num_gpus > 1 and parallel_enabled
+        use_parallel = parallel_enabled
 
         tracker = get_compute_tracker()
         with tracker.track_phase(f"data_generation_{dataset}"):
             if use_parallel:
                 logger.info(
-                    f"Using parallel generation with {gpu_manager.num_gpus} GPUs"
+                    f"🔧 Using parallel generation with {gpu_manager.num_gpus} GPUs"
                 )
                 records = self._generate_data_parallel(
                     cfg, ref_model, dataset, family, round_idx, cls_model, run_root
                 )
             else:
-                logger.info("Using sequential generation")
+                logger.info("🔧 Using sequential generation")
                 records = self._generate_data_sequential(
                     cfg, ref_model, dataset, family, round_idx, cls_model, run_root
                 )
 
-        if not records:
+        all_records = existing_records + records
+
+        if not all_records:
             return
 
-        new_ds = Dataset.from_list(records)
+        logger.info(f"💾 Saving {len(all_records)} total records")
+        new_ds = Dataset.from_list(all_records)
         merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
+
+        clear_checkpoints(checkpoint_dir)
+        logger.info(f"🧹 Cleared checkpoints")
 
     def _generate_data_parallel(
         self,
@@ -199,8 +224,8 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         ds = self._build_dataset(cfg, dataset)
         self._dataset = ds
         samples_per_example = int(cfg.data_collection.samples_per_example)
-        max_examples = int(cfg.data_collection.max_examples or 0)
-        limit = max_examples if max_examples > 0 else len(ds)
+        limit = int(getattr(cfg.datasets[dataset], "train_size_cap", 0) or 0)
+        limit = limit if limit > 0 else len(ds)
 
         # Collect examples
         examples = []
@@ -354,18 +379,25 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                 batch_size=reward_batch_size,
             )
 
-            # Process examples - PHASE 1: Generate all samples first
             gen_cfg = model.gen_cfg
-            logger.info(f"Worker {worker_id} processing {len(examples)} examples")
+            batch_size = int(cfg.algos[self.algo_key].batch_size)
+            logger.info(
+                f"🔄 Worker {worker_id} processing {len(examples)} examples with batch_size={batch_size}"
+            )
 
-            # Collect all generated samples for batch scoring
-            generated_samples = []
+            # PHASE 1: Batch all roll_in calls
+            prompts = [ex["prompt"] for ex in examples]
+            rollouts = model.roll_in_batch(
+                prompts, gen_cfg.max_new_tokens, batch_size=batch_size
+            )
 
-            for ex in examples:
-                rollout = model.roll_in(
-                    ex["prompt"], max_roll_tokens=gen_cfg.max_new_tokens
-                )
-
+            # PHASE 2: Prepare contexts for continuation
+            contexts_to_continue = []
+            for ex, rollout in tqdm(
+                zip(examples, rollouts),
+                total=len(examples),
+                desc=f"Worker {worker_id}: preparing contexts",
+            ):
                 built_prompt = rollout["prompt"]
                 prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
                 context_token_ids = rollout["context_ids"].tolist()
@@ -390,40 +422,82 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                     )
 
                     remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
-                    y_ref = model.continue_from_context(
-                        context_text, max_new_tokens=remaining_token_budget, greedy=True
-                    )
-                    y_sample = model.continue_from_context(
-                        context_text,
-                        max_new_tokens=remaining_token_budget,
-                        greedy=False,
-                    )
-
-                    y_a = solution_prefix_text + y_ref
-                    y_b = solution_prefix_text + y_sample
-
-                    # Store for batch scoring
-                    generated_samples.append(
+                    contexts_to_continue.append(
                         {
                             "ex": ex,
-                            "y_a": y_a,
-                            "y_b": y_b,
-                            "cutoff_tokens": cutoff_tokens,
+                            "context_text": context_text,
                             "solution_prefix_text": solution_prefix_text,
+                            "cutoff_tokens": cutoff_tokens,
+                            "remaining_token_budget": remaining_token_budget,
                         }
                     )
 
+            if not contexts_to_continue:
+                logger.info(
+                    f"⚠️ Worker {worker_id} has no valid contexts (all rollouts too short)"
+                )
+                result_queue.put([])
+                return
+
+            # Filter out contexts with non-positive remaining tokens
+            contexts_to_continue = [
+                ctx
+                for ctx in contexts_to_continue
+                if ctx["remaining_token_budget"] >= 1
+            ]
+
+            if not contexts_to_continue:
+                logger.info(
+                    f"⚠️ Worker {worker_id} has no valid contexts (all have insufficient remaining tokens)"
+                )
+                result_queue.put([])
+                return
+
             logger.info(
-                f"Worker {worker_id} generated {len(generated_samples)} samples, now batch scoring..."
+                f"🔄 Worker {worker_id} prepared {len(contexts_to_continue)} contexts, now batching continuations..."
             )
 
-            # PHASE 2: Batch score all samples at once
+            # PHASE 3: Batch all continue_from_context calls
+            all_contexts = [item["context_text"] for item in contexts_to_continue]
+            min_remaining_tokens = min(
+                item["remaining_token_budget"] for item in contexts_to_continue
+            )
+
+            greedy_continuations = model.continue_from_context_batch(
+                all_contexts, min_remaining_tokens, greedy=True, batch_size=batch_size
+            )
+            sampled_continuations = model.continue_from_context_batch(
+                all_contexts, min_remaining_tokens, greedy=False, batch_size=batch_size
+            )
+
+            # PHASE 4: Assemble generated samples
+            generated_samples = []
+            for ctx, y_ref, y_sample in zip(
+                contexts_to_continue, greedy_continuations, sampled_continuations
+            ):
+                y_a = ctx["solution_prefix_text"] + y_ref
+                y_b = ctx["solution_prefix_text"] + y_sample
+                generated_samples.append(
+                    {
+                        "ex": ctx["ex"],
+                        "y_a": y_a,
+                        "y_b": y_b,
+                        "cutoff_tokens": ctx["cutoff_tokens"],
+                        "solution_prefix_text": ctx["solution_prefix_text"],
+                    }
+                )
+
+            logger.info(
+                f"✅ Worker {worker_id} generated {len(generated_samples)} samples, now batch scoring..."
+            )
+
+            # PHASE 5: Batch score all samples at once
             score_pairs = [
                 (s["ex"]["question"], s["y_a"], s["y_b"]) for s in generated_samples
             ]
             scores = reward_scorer.score_batch(score_pairs)
 
-            # PHASE 3: Create records with scores
+            # PHASE 6: Create records with scores
             records = []
             for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
                 records.append(
@@ -442,7 +516,18 @@ class ValueGuidedAlgorithms(AlgorithmBase):
                     }
                 )
 
-            logger.info(f"Worker {worker_id} generated {len(records)} records")
+            logger.info(f"✅ Worker {worker_id} generated {len(records)} records")
+
+            from pita.core.io import get_checkpoint_dir, save_checkpoint
+
+            if run_root is None:
+                run_root = get_run_root()
+            checkpoint_dir = get_checkpoint_dir(
+                self.algo_key, dataset, family, round_idx, run_root
+            )
+            save_checkpoint(checkpoint_dir, worker_id, records)
+            logger.info(f"💾 Worker {worker_id} saved checkpoint")
+
             result_queue.put(records)
 
         except Exception as e:
@@ -451,6 +536,17 @@ class ValueGuidedAlgorithms(AlgorithmBase):
 
             traceback.print_exc()
             result_queue.put(e)
+        finally:
+            if "reward_scorer" in locals() and reward_scorer is not None:
+                reward_scorer.cleanup()
+            if "model" in locals():
+                del model
+            if "ref_hf" in locals():
+                del ref_hf
+            if "prev_classifier" in locals():
+                del prev_classifier
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _build_model_for_worker(
         self, cfg: DictConfig, model_alias: str, device_id: int
@@ -576,100 +672,152 @@ class ValueGuidedAlgorithms(AlgorithmBase):
         )
 
         samples_per_example = int(cfg.data_collection.samples_per_example)
+        batch_size = int(cfg.algos[self.algo_key].batch_size)
+        chunk_size = int(getattr(cfg.data_collection, "chunk_size", 100))
 
-        # PHASE 1: Generate all samples first
-        max_examples = int(cfg.data_collection.max_examples or 0)
-        limit = max_examples if max_examples > 0 else len(ds)
+        limit = int(getattr(cfg.datasets[dataset], "train_size_cap", 0) or 0)
+        limit = limit if limit > 0 else len(ds)
 
-        generated_samples = []
-
-        for ex in tqdm(
-            islice(ds.iter(), limit),
-            total=limit,
-            desc=f"{self.algo_key}:{dataset} (generating)",
-        ):
+        # Collect all examples (lightweight - just metadata)
+        examples = []
+        for ex in islice(ds.iter(), limit):
             prompt = ds.hydrate_prompt(ex.question)
-            rollout = model.roll_in(prompt, max_roll_tokens=gen_cfg.max_new_tokens)
+            examples.append({"ex": ex, "prompt": prompt})
 
-            built_prompt = rollout["prompt"]
-            prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
-            context_token_ids = rollout["context_ids"].tolist()
-            full_token_count = len(context_token_ids)
-            rollout_token_count = full_token_count - prompt_token_count
+        logger.info(
+            f"🔄 Processing {len(examples)} examples in chunks of {chunk_size} (batch_size={batch_size})"
+        )
 
-            if rollout_token_count < 2:
+        all_records: List[Dict[str, Any]] = []
+
+        # Process examples in chunks to reduce peak memory usage
+        for chunk_start in range(0, len(examples), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(examples))
+            chunk_examples = examples[chunk_start:chunk_end]
+
+            logger.info(
+                f"📦 Processing chunk {chunk_start//chunk_size + 1}/{(len(examples) + chunk_size - 1)//chunk_size} "
+                f"(examples {chunk_start+1}-{chunk_end}/{len(examples)})"
+            )
+
+            # PHASE 1: Batch roll_in calls for this chunk
+            prompts = [item["prompt"] for item in chunk_examples]
+            rollouts = model.roll_in_batch(
+                prompts, gen_cfg.max_new_tokens, batch_size=batch_size
+            )
+
+            # PHASE 2: Prepare contexts for continuation
+            contexts_to_continue = []
+            for item, rollout in zip(chunk_examples, rollouts):
+                built_prompt = rollout["prompt"]
+                prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
+                context_token_ids = rollout["context_ids"].tolist()
+                full_token_count = len(context_token_ids)
+                rollout_token_count = full_token_count - prompt_token_count
+
+                if rollout_token_count < 2:
+                    continue
+
+                for _ in range(samples_per_example):
+                    cutoff_tokens = random.randint(1, rollout_token_count - 1)
+                    context_prefix_ids = context_token_ids[
+                        : prompt_token_count + cutoff_tokens
+                    ]
+                    context_text = model.tokenizer.decode(
+                        context_prefix_ids, skip_special_tokens=True
+                    )
+                    solution_prefix_ids = context_prefix_ids[prompt_token_count:]
+                    solution_prefix_text = model.tokenizer.decode(
+                        solution_prefix_ids, skip_special_tokens=True
+                    )
+                    remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
+
+                    if remaining_token_budget >= 1:
+                        contexts_to_continue.append(
+                            {
+                                "ex": item["ex"],
+                                "prompt": item["prompt"],
+                                "context_text": context_text,
+                                "solution_prefix_text": solution_prefix_text,
+                                "cutoff_tokens": cutoff_tokens,
+                                "remaining_token_budget": remaining_token_budget,
+                            }
+                        )
+
+            if not contexts_to_continue:
                 logger.info(
-                    "Skipping example due to short rollout: dataset={} family={} prompt_tokens={} rollout_tokens={}",
-                    dataset,
-                    str(family),
-                    prompt_token_count,
-                    rollout_token_count,
+                    f"⏭️  Chunk {chunk_start//chunk_size + 1}: No valid contexts, skipping"
                 )
+                del rollouts
                 continue
 
-            for _ in range(samples_per_example):
-                cutoff_tokens = random.randint(1, rollout_token_count - 1)
+            # PHASE 3: Batch continue_from_context calls
+            all_contexts = [item["context_text"] for item in contexts_to_continue]
+            min_remaining_tokens = min(
+                item["remaining_token_budget"] for item in contexts_to_continue
+            )
 
-                context_prefix_ids = context_token_ids[
-                    : prompt_token_count + cutoff_tokens
-                ]
-                context_text = model.tokenizer.decode(
-                    context_prefix_ids, skip_special_tokens=True
-                )
-                solution_prefix_ids = context_prefix_ids[prompt_token_count:]
-                solution_prefix_text = model.tokenizer.decode(
-                    solution_prefix_ids, skip_special_tokens=True
-                )
+            greedy_continuations = model.continue_from_context_batch(
+                all_contexts, min_remaining_tokens, greedy=True, batch_size=batch_size
+            )
+            sampled_continuations = model.continue_from_context_batch(
+                all_contexts, min_remaining_tokens, greedy=False, batch_size=batch_size
+            )
 
-                remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
-                y_ref = model.continue_from_context(
-                    context_text, max_new_tokens=remaining_token_budget, greedy=True
-                )
-                y_sample = model.continue_from_context(
-                    context_text, max_new_tokens=remaining_token_budget, greedy=False
-                )
-
-                y_a = solution_prefix_text + y_ref
-                y_b = solution_prefix_text + y_sample
-
-                # Store for batch scoring
+            # PHASE 4: Assemble generated samples
+            generated_samples = []
+            for ctx, y_ref, y_sample in zip(
+                contexts_to_continue, greedy_continuations, sampled_continuations
+            ):
+                y_a = ctx["solution_prefix_text"] + y_ref
+                y_b = ctx["solution_prefix_text"] + y_sample
                 generated_samples.append(
                     {
-                        "ex": ex,
-                        "prompt": prompt,
+                        "ex": ctx["ex"],
+                        "prompt": ctx["prompt"],
                         "y_a": y_a,
                         "y_b": y_b,
-                        "cutoff_tokens": cutoff_tokens,
-                        "solution_prefix_text": solution_prefix_text,
+                        "cutoff_tokens": ctx["cutoff_tokens"],
                     }
                 )
 
-        # PHASE 2: Batch score all samples
-        logger.info(f"Generated {len(generated_samples)} samples, now batch scoring...")
-        score_pairs = [
-            (s["ex"].question, s["y_a"], s["y_b"]) for s in generated_samples
-        ]
-        scores = reward_scorer.score_batch(score_pairs)
+            # PHASE 5: Batch score samples
+            score_pairs = [
+                (s["ex"].question, s["y_a"], s["y_b"]) for s in generated_samples
+            ]
+            scores = reward_scorer.score_batch(score_pairs)
 
-        # PHASE 3: Create records with scores
-        records: List[Dict[str, Any]] = []
-        for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
-            records.append(
-                {
-                    "question": sample["ex"].question,
-                    "answer": sample["ex"].answer,
-                    "prompt": sample["prompt"],
-                    "t": sample["cutoff_tokens"],
-                    "context": sample["prompt"] + sample["solution_prefix_text"],
-                    "y_a": sample["y_a"],
-                    "y_b": sample["y_b"],
-                    "score_a": score_a,
-                    "score_b": score_b,
-                    "preferred": preferred,
-                }
+            # PHASE 6: Create records
+            for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
+                all_records.append(
+                    {
+                        "question": sample["ex"].question,
+                        "answer": sample["ex"].answer,
+                        "prompt": sample["prompt"],
+                        "t": sample["cutoff_tokens"],
+                        "context": sample["prompt"]
+                        + sample["y_a"][: sample["cutoff_tokens"]],
+                        "y_a": sample["y_a"],
+                        "y_b": sample["y_b"],
+                        "score_a": score_a,
+                        "score_b": score_b,
+                        "preferred": preferred,
+                    }
+                )
+
+            # Clear chunk data to free memory
+            del rollouts, contexts_to_continue, all_contexts
+            del greedy_continuations, sampled_continuations, generated_samples
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            logger.info(
+                f"✅ Chunk {chunk_start//chunk_size + 1} complete: {len(all_records)} total records so far"
             )
 
-        return records
+        reward_scorer.cleanup()
+        logger.info(f"🎉 All chunks processed: {len(all_records)} total records")
+        return all_records
 
     def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
         raise NotImplementedError
@@ -731,9 +879,28 @@ class PostTrainingAlgorithms(AlgorithmBase):
         run_root: Optional[Path] = None,
     ) -> None:
         """Generate data using parallel multi-GPU processing when available."""
+        from pita.core.io import (
+            get_checkpoint_dir,
+            load_all_checkpoints,
+            clear_checkpoints,
+        )
+
+        if run_root is None:
+            run_root = get_run_root()
+
         snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
             self.algo_key, dataset, family, round_idx, run_root=run_root
         )
+
+        checkpoint_dir = get_checkpoint_dir(
+            self.algo_key, dataset, family, round_idx, run_root
+        )
+
+        existing_records = load_all_checkpoints(checkpoint_dir)
+        if existing_records:
+            logger.info(
+                f"💾 Found {len(existing_records)} records from previous checkpoints"
+            )
 
         gpu_manager = get_gpu_manager()
         parallel_enabled = (
@@ -741,28 +908,34 @@ class PostTrainingAlgorithms(AlgorithmBase):
             if hasattr(cfg, "parallel_generation")
             else True
         )
-        use_parallel = gpu_manager.num_gpus > 1 and parallel_enabled
+        use_parallel = parallel_enabled
 
         tracker = get_compute_tracker()
         with tracker.track_phase(f"data_generation_{dataset}"):
             if use_parallel:
                 logger.info(
-                    f"Using parallel generation with {gpu_manager.num_gpus} GPUs"
+                    f"🔧 Using parallel generation with {gpu_manager.num_gpus} GPUs"
                 )
                 records = self._generate_data_parallel(
                     cfg, ref_model, dataset, family, round_idx, run_root
                 )
             else:
-                logger.info("Using sequential generation with optimized batching")
+                logger.info("🔧 Using sequential generation with optimized batching")
                 records = self._generate_data_sequential(
                     cfg, ref_model, dataset, family, round_idx, run_root
                 )
 
-        if not records:
+        all_records = existing_records + records
+
+        if not all_records:
             return
 
-        new_ds = Dataset.from_list(records)
+        logger.info(f"💾 Saving {len(all_records)} total records")
+        new_ds = Dataset.from_list(all_records)
         merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
+
+        clear_checkpoints(checkpoint_dir)
+        logger.info(f"🧹 Cleared checkpoints")
 
     def _generate_data_sequential(
         self,
@@ -794,65 +967,101 @@ class PostTrainingAlgorithms(AlgorithmBase):
         )
 
         samples_per_example = int(cfg.data_collection.samples_per_example)
+        batch_size = int(cfg.algos[self.algo_key].batch_size)
+        chunk_size = int(getattr(cfg.data_collection, "chunk_size", 100))
 
-        # PHASE 1: Generate all samples first
-        max_examples = int(cfg.data_collection.max_examples or 0)
-        limit = max_examples if max_examples > 0 else len(ds)
+        limit = int(getattr(cfg.datasets[dataset], "train_size_cap", 0) or 0)
+        limit = limit if limit > 0 else len(ds)
 
-        generated_samples = []
-
-        for ex in tqdm(
-            islice(ds.iter(), limit),
-            total=limit,
-            desc=f"{self.algo_key}:{dataset} (generating)",
-        ):
+        # Collect all examples (lightweight - just metadata)
+        examples = []
+        for ex in islice(ds.iter(), limit):
             prompt = ds.hydrate_prompt(ex.question)
             built = build_instruction_prompt(
                 prompt,
                 tokenizer=model.tokenizer,
                 use_chat_template=model.gen_cfg.use_chat_template,
             )
-            for _ in range(samples_per_example):
-                y_a = model.continue_from_context(
-                    built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
-                )
-                y_b = model.continue_from_context(
-                    built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
-                )
-                # Store for batch scoring
+            examples.append({"ex": ex, "prompt": prompt, "built": built})
+
+        logger.info(
+            f"🔄 Processing {len(examples)} examples in chunks of {chunk_size} (batch_size={batch_size})"
+        )
+
+        all_records: List[Dict[str, Any]] = []
+
+        # Process examples in chunks to reduce peak memory usage
+        for chunk_start in range(0, len(examples), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(examples))
+            chunk_examples = examples[chunk_start:chunk_end]
+
+            logger.info(
+                f"📦 Processing chunk {chunk_start//chunk_size + 1}/{(len(examples) + chunk_size - 1)//chunk_size} "
+                f"(examples {chunk_start+1}-{chunk_end}/{len(examples)})"
+            )
+
+            # PHASE 1: Build prompts for this chunk
+            prompts_to_generate = []
+            for item in chunk_examples:
+                for _ in range(samples_per_example):
+                    prompts_to_generate.append(item)
+
+            # PHASE 2: Batch generate y_a (sampled)
+            all_prompts = [item["built"] for item in prompts_to_generate]
+            y_a_list = model.continue_from_context_batch(
+                all_prompts, gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+            )
+
+            # PHASE 3: Batch generate y_b (sampled)
+            y_b_list = model.continue_from_context_batch(
+                all_prompts, gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+            )
+
+            # PHASE 4: Assemble generated samples
+            generated_samples = []
+            for item, y_a, y_b in zip(prompts_to_generate, y_a_list, y_b_list):
                 generated_samples.append(
                     {
-                        "ex": ex,
-                        "prompt": prompt,
+                        "ex": item["ex"],
+                        "prompt": item["prompt"],
                         "y_a": y_a,
                         "y_b": y_b,
                     }
                 )
 
-        # PHASE 2: Batch score all samples
-        logger.info(f"Generated {len(generated_samples)} samples, now batch scoring...")
-        score_pairs = [
-            (s["ex"].question, s["y_a"], s["y_b"]) for s in generated_samples
-        ]
-        scores = self._reward.score_batch(score_pairs)
+            # PHASE 5: Batch score samples
+            score_pairs = [
+                (s["ex"].question, s["y_a"], s["y_b"]) for s in generated_samples
+            ]
+            scores = self._reward.score_batch(score_pairs)
 
-        # PHASE 3: Create records with scores
-        records: List[Dict[str, Any]] = []
-        for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
-            records.append(
-                {
-                    "question": sample["ex"].question,
-                    "answer": sample["ex"].answer,
-                    "prompt": sample["prompt"],
-                    "y_a": sample["y_a"],
-                    "y_b": sample["y_b"],
-                    "score_a": score_a,
-                    "score_b": score_b,
-                    "preferred": preferred,
-                }
+            # PHASE 6: Create records
+            for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
+                all_records.append(
+                    {
+                        "question": sample["ex"].question,
+                        "answer": sample["ex"].answer,
+                        "prompt": sample["prompt"],
+                        "y_a": sample["y_a"],
+                        "y_b": sample["y_b"],
+                        "score_a": score_a,
+                        "score_b": score_b,
+                        "preferred": preferred,
+                    }
+                )
+
+            # Clear chunk data to free memory
+            del prompts_to_generate, all_prompts, y_a_list, y_b_list, generated_samples
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            logger.info(
+                f"✅ Chunk {chunk_start//chunk_size + 1} complete: {len(all_records)} total records so far"
             )
 
-        return records
+        self._reward.cleanup()
+        logger.info(f"🎉 All chunks processed: {len(all_records)} total records")
+        return all_records
 
     def _generate_data_parallel(
         self,
@@ -870,8 +1079,8 @@ class PostTrainingAlgorithms(AlgorithmBase):
 
         ds = self._build_dataset(cfg, dataset)
         samples_per_example = int(cfg.data_collection.samples_per_example)
-        max_examples = int(cfg.data_collection.max_examples or 0)
-        limit = max_examples if max_examples > 0 else len(ds)
+        limit = int(getattr(cfg.datasets[dataset], "train_size_cap", 0) or 0)
+        limit = limit if limit > 0 else len(ds)
 
         examples = []
         for ex in islice(ds.iter(), limit):
@@ -913,9 +1122,12 @@ class PostTrainingAlgorithms(AlgorithmBase):
                         cfg,
                         ref_model,
                         dataset,
+                        family,
+                        round_idx,
                         samples_per_example,
                         int(cfg.data_collection.seed) + worker_id,
                         result_queue,
+                        run_root,
                     ),
                 )
                 p.start()
@@ -952,9 +1164,12 @@ class PostTrainingAlgorithms(AlgorithmBase):
         cfg: DictConfig,
         ref_model: str,
         dataset: str,
+        family: str,
+        round_idx: int,
         samples_per_example: int,
         seed: int,
         result_queue,
+        run_root: Optional[Path] = None,
     ):
         """Worker for DPO-style generation."""
         try:
@@ -982,13 +1197,14 @@ class PostTrainingAlgorithms(AlgorithmBase):
                 batch_size=reward_batch_size,
             )
 
-            # PHASE 1: Generate all samples first
             gen_cfg = model.gen_cfg
-            logger.info(f"Worker {worker_id} processing {len(examples)} examples")
+            batch_size = int(cfg.algos[self.algo_key].batch_size)
+            logger.info(
+                f"🔄 Worker {worker_id} processing {len(examples)} examples with batch_size={batch_size}"
+            )
 
-            # Collect all generated samples for batch scoring
-            generated_samples = []
-
+            # PHASE 1: Build all prompts
+            prompts_to_generate = []
             for ex in examples:
                 built = build_instruction_prompt(
                     ex["prompt"],
@@ -996,32 +1212,45 @@ class PostTrainingAlgorithms(AlgorithmBase):
                     use_chat_template=model.gen_cfg.use_chat_template,
                 )
                 for _ in range(samples_per_example):
-                    y_a = model.continue_from_context(
-                        built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
-                    )
-                    y_b = model.continue_from_context(
-                        built, max_new_tokens=gen_cfg.max_new_tokens, greedy=False
-                    )
-                    # Store for batch scoring
-                    generated_samples.append(
-                        {
-                            "ex": ex,
-                            "y_a": y_a,
-                            "y_b": y_b,
-                        }
-                    )
+                    prompts_to_generate.append({"ex": ex, "built": built})
 
             logger.info(
-                f"Worker {worker_id} generated {len(generated_samples)} samples, now batch scoring..."
+                f"🔄 Worker {worker_id} prepared {len(prompts_to_generate)} prompts, now batching generations..."
             )
 
-            # PHASE 2: Batch score all samples at once
+            # PHASE 2: Batch generate y_a (sampled)
+            all_prompts = [item["built"] for item in prompts_to_generate]
+            y_a_list = model.continue_from_context_batch(
+                all_prompts, gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+            )
+
+            # PHASE 3: Batch generate y_b (sampled)
+            y_b_list = model.continue_from_context_batch(
+                all_prompts, gen_cfg.max_new_tokens, greedy=False, batch_size=batch_size
+            )
+
+            # PHASE 4: Assemble generated samples
+            generated_samples = []
+            for item, y_a, y_b in zip(prompts_to_generate, y_a_list, y_b_list):
+                generated_samples.append(
+                    {
+                        "ex": item["ex"],
+                        "y_a": y_a,
+                        "y_b": y_b,
+                    }
+                )
+
+            logger.info(
+                f"✅ Worker {worker_id} generated {len(generated_samples)} samples, now batch scoring..."
+            )
+
+            # PHASE 5: Batch score all samples at once
             score_pairs = [
                 (s["ex"]["question"], s["y_a"], s["y_b"]) for s in generated_samples
             ]
             scores = reward_scorer.score_batch(score_pairs)
 
-            # PHASE 3: Create records with scores
+            # PHASE 6: Create records with scores
             records = []
             for sample, (score_a, score_b, preferred) in zip(generated_samples, scores):
                 records.append(
@@ -1037,7 +1266,18 @@ class PostTrainingAlgorithms(AlgorithmBase):
                     }
                 )
 
-            logger.info(f"Worker {worker_id} generated {len(records)} records")
+            logger.info(f"✅ Worker {worker_id} generated {len(records)} records")
+
+            from pita.core.io import get_checkpoint_dir, save_checkpoint
+
+            if run_root is None:
+                run_root = get_run_root()
+            checkpoint_dir = get_checkpoint_dir(
+                self.algo_key, dataset, family, round_idx, run_root
+            )
+            save_checkpoint(checkpoint_dir, worker_id, records)
+            logger.info(f"💾 Worker {worker_id} saved checkpoint")
+
             result_queue.put(records)
 
         except Exception as e:
@@ -1046,6 +1286,13 @@ class PostTrainingAlgorithms(AlgorithmBase):
 
             traceback.print_exc()
             result_queue.put(e)
+        finally:
+            if "reward_scorer" in locals() and reward_scorer is not None:
+                reward_scorer.cleanup()
+            if "model" in locals():
+                del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def score_samples(self, ex, y_a: str, y_b: str) -> Tuple[float, float, int]:
         r_a, r_b, preferred = self._reward.score_pair(ex.question, y_a, y_b)

@@ -51,6 +51,18 @@ class RewardScorer:
     def tokenizer(self):
         return self._tokenizer
 
+    def cleanup(self):
+        """Release GPU memory held by the pipeline and model."""
+        if hasattr(self, "_pipe") and self._pipe is not None:
+            if hasattr(self._pipe, "model"):
+                del self._pipe.model
+            del self._pipe
+            self._pipe = None
+        if hasattr(self, "_tokenizer"):
+            del self._tokenizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def score_pair(self, question: str, y_a: str, y_b: str) -> Tuple[float, float, int]:
         if "distilbert-imdb" in self._model_id:
             texts = [y_a, y_b]
@@ -171,5 +183,54 @@ class RewardScorer:
                 preferred = 0 if r_a >= r_b else 1
 
             results.append((r_a, r_b, preferred))
+
+        return results
+
+    def score_batch_single(self, pairs: List[Tuple[str, str]]) -> List[float]:
+        """Score multiple (question, y) pairs in batch for efficiency.
+
+        Args:
+            pairs: List of (question, y) tuples to score
+
+        Returns:
+            List of reward scores
+        """
+        if not pairs:
+            return []
+
+        # Build all texts for batching
+        all_texts = []
+        if "distilbert-imdb" in self._model_id:
+            # For IMDb, we just score y directly
+            for _, y in pairs:
+                all_texts.append(y)
+        else:
+            # For other models, build reward model prompts
+            for question, y in pairs:
+                texts = build_reward_model_prompt(
+                    question=question, y_a=y, y_b=y, tokenizer=self._tokenizer
+                )
+                # Use only the first text to avoid duplicate compute
+                all_texts.append(texts[0])
+
+        # Batch score all texts at once
+        outs = self._pipe(
+            all_texts, top_k=None, function_to_apply="none", batch_size=self._batch_size
+        )
+
+        # Parse results
+        results = []
+        for i in range(len(pairs)):
+            if "distilbert-imdb" in self._model_id:
+                # Extract POSITIVE score
+                r = [d for d in outs[i] if d["label"] == "POSITIVE"][0]["score"]
+            else:
+                # Extract score from reward model output
+                r = (
+                    float(outs[i][0]["score"])
+                    if isinstance(outs[i], list)
+                    else float(outs[i]["score"])
+                )
+            results.append(r)
 
         return results
