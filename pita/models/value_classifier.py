@@ -11,137 +11,6 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from pita.models.catalog import resolve_model_id
 
 
-def _expand_cache_for_candidates(cache: Any, bs: int, top_k: int) -> Any:
-    """Expand a KV cache for parallel candidate scoring.
-
-    Handles:
-    - Legacy tuple format
-    - DynamicCache
-    - HybridCache (Gemma 3)
-    """
-    if cache is None:
-        return None
-
-    # Handle HybridCache (Gemma 3) specifically if possible
-    cache_class_name = type(cache).__name__
-    if cache_class_name == "HybridCache":
-        try:
-            from transformers.cache_utils import HybridCache
-            
-            # HybridCache needs the original config to maintain sliding window settings
-            expanded = HybridCache(
-                config=cache.config,
-                batch_size=bs * top_k,
-                max_cache_len=cache.max_cache_len,
-                device=cache.key_cache[0].device if cache.key_cache else None,
-                dtype=cache.key_cache[0].dtype if cache.key_cache else None,
-            )
-            # Copy over the current sequence length metadata
-            if hasattr(cache, "seen_tokens"):
-                expanded.seen_tokens = cache.seen_tokens
-                
-            for layer_idx in range(len(cache.key_cache)):
-                key = cache.key_cache[layer_idx]
-                value = cache.value_cache[layer_idx]
-                if key.numel() == 0:
-                    continue
-                
-                shape = list(key.shape)
-                exp_key = (
-                    key.unsqueeze(1)
-                    .expand(bs, top_k, *shape[1:])
-                    .reshape(bs * top_k, *shape[1:])
-                )
-                exp_value = (
-                    value.unsqueeze(1)
-                    .expand(bs, top_k, *shape[1:])
-                    .reshape(bs * top_k, *shape[1:])
-                )
-                expanded.update(exp_key, exp_value, layer_idx)
-            return expanded
-        except (ImportError, AttributeError, RuntimeError):
-            pass
-
-    # Handle legacy tuple format (tuple of tuples)
-    if isinstance(cache, tuple):
-        try:
-            from transformers.cache_utils import DynamicCache
-            expanded = DynamicCache()
-            for layer_idx, layer_kv in enumerate(cache):
-                if isinstance(layer_kv, tuple) and len(layer_kv) == 2:
-                    key, value = layer_kv
-                    shape = list(key.shape)
-                    exp_key = (
-                        key.unsqueeze(1)
-                        .expand(bs, top_k, *shape[1:])
-                        .reshape(bs * top_k, *shape[1:])
-                    )
-                    exp_value = (
-                        value.unsqueeze(1)
-                        .expand(bs, top_k, *shape[1:])
-                        .reshape(bs * top_k, *shape[1:])
-                    )
-                    expanded.update(exp_key, exp_value, layer_idx)
-                else:
-                    raise ImportError("Cannot convert to DynamicCache")
-            return expanded
-        except (ImportError, AttributeError):
-            expanded_list = []
-            for layer_kv in cache:
-                if isinstance(layer_kv, tuple) and len(layer_kv) == 2:
-                    key, value = layer_kv
-                    shape = list(key.shape)
-                    exp_key = (
-                        key.unsqueeze(1)
-                        .expand(bs, top_k, *shape[1:])
-                        .reshape(bs * top_k, *shape[1:])
-                    )
-                    exp_value = (
-                        value.unsqueeze(1)
-                        .expand(bs, top_k, *shape[1:])
-                        .reshape(bs * top_k, *shape[1:])
-                    )
-                    expanded_list.append((exp_key, exp_value))
-                else:
-                    expanded_list.append(layer_kv)
-            return tuple(expanded_list)
-
-    # Handle modern Cache objects (DynamicCache, etc.)
-    key_cache = getattr(cache, "key_cache", None) or getattr(cache, "_key_cache", None)
-    value_cache = getattr(cache, "value_cache", None) or getattr(
-        cache, "_value_cache", None
-    )
-
-    if key_cache is not None and value_cache is not None:
-        try:
-            from transformers.cache_utils import DynamicCache
-            expanded = DynamicCache()
-            for layer_idx in range(len(key_cache)):
-                key = key_cache[layer_idx]
-                value = value_cache[layer_idx]
-                shape = list(key.shape)
-                exp_key = (
-                    key.unsqueeze(1)
-                    .expand(bs, top_k, *shape[1:])
-                    .reshape(bs * top_k, *shape[1:])
-                )
-                exp_value = (
-                    value.unsqueeze(1)
-                    .expand(bs, top_k, *shape[1:])
-                    .reshape(bs * top_k, *shape[1:])
-                )
-                expanded.update(exp_key, exp_value, layer_idx)
-            return expanded
-        except ImportError:
-            pass
-
-    if hasattr(cache, "to_legacy_cache"):
-        legacy = cache.to_legacy_cache()
-        return _expand_cache_for_candidates(legacy, bs, top_k)
-
-    return cache
-
-
 class ValueClassifier(nn.Module):
     def __init__(
         self,
@@ -284,16 +153,15 @@ class ValueClassifier(nn.Module):
         use_cache: Optional[bool] = None,
         past_key_values: Optional[Any] = None,
     ) -> Any:
-        """Score candidate tokens for guided generation.
+        """Score candidate tokens for guided generation using a custom attention mask.
 
-        This method uses a two-phase approach:
-        1. Process/update the prefix to get prefix KV cache
-        2. Score all candidates in parallel using the prefix cache
+        This avoids KV cache expansion by treating all top_k candidates as a single
+        batch with a custom 4D mask that prevents them from attending to each other.
         """
         bs, seq_len = input_ids.shape
         top_k = logit_indices.size(1)
 
-        # Phase 1: Process prefix to get/update prefix KV cache
+        # Phase 1: Process prefix to get prefix KV cache
         prefix_out = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -305,79 +173,55 @@ class ValueClassifier(nn.Module):
         prefix_pkv = prefix_out.past_key_values
         del prefix_out
 
-        # Determine past_len for position_ids
+        # Determine past_len
         if prefix_pkv is None:
             past_len = 0
         elif hasattr(prefix_pkv, "get_seq_length"):
             past_len = prefix_pkv.get_seq_length()
         else:
-            # Fallback for legacy tuple cache [layer][key/value][bs, heads, seq, dim]
             try:
                 past_len = prefix_pkv[0][0].shape[-2]
             except (IndexError, TypeError, AttributeError):
                 past_len = seq_len
 
-        # Phase 2: Score all candidates in parallel using prefix cache
-        expanded_pkv = _expand_cache_for_candidates(prefix_pkv, bs, top_k)
-
-        # Candidate tokens as input
-        candidate_ids = logit_indices.reshape(bs * top_k, 1)
-
-        # Explicit position_ids for correct RoPE embeddings
+        # Phase 2: Score all candidates in parallel using shared prefix cache
+        candidate_ids = logit_indices.to(self.device)
         candidate_positions = torch.full(
-            (bs * top_k, 1),
-            past_len,
-            dtype=torch.long,
-            device=self.device,
+            (bs, top_k), past_len, dtype=torch.long, device=self.device
         )
 
-        # Check if this is a HybridCache (Gemma 3 with sliding window attention)
-        cache_class_name = type(prefix_pkv).__name__
-        is_hybrid_cache = cache_class_name == "HybridCache"
-
-        if is_hybrid_cache:
-            # For HybridCache: don't pass attention_mask, let model compute internally
-            # This avoids mismatch between mask size and sliding window cache size
-            expanded_mask = None
-        elif attention_mask is not None:
-            # For regular caches: use 4D mask for SDPA robustness
-            expanded_mask = (
-                attention_mask.unsqueeze(1)
-                .expand(bs, top_k, past_len)
-                .reshape(bs * top_k, past_len)
-            )
-            expanded_mask = torch.cat(
-                [
-                    expanded_mask,
-                    torch.ones(
-                        (bs * top_k, 1),
-                        dtype=expanded_mask.dtype,
-                        device=expanded_mask.device,
-                    ),
-                ],
-                dim=1,
-            )
-            # Convert to 4D for SDPA: [batch, 1, 1, kv_len] broadcasts across heads
-            # SDPA expects additive float mask: 0.0 = attend, -inf = don't attend
-            dtype = self.backbone.dtype
-            expanded_mask = expanded_mask.view(bs * top_k, 1, 1, past_len + 1)
-            expanded_mask = expanded_mask.to(dtype=dtype)
-            expanded_mask = (1.0 - expanded_mask) * torch.finfo(dtype).min
+        # Build custom 4D mask: [bs, 1, top_k, past_len + top_k]
+        # Each candidate attends to all prefix tokens but ONLY itself in the candidate set
+        if attention_mask is not None:
+            prefix_mask = attention_mask.unsqueeze(1).expand(bs, top_k, past_len)
         else:
-            expanded_mask = None
+            prefix_mask = torch.ones(
+                (bs, top_k, past_len), device=self.device, dtype=torch.long
+            )
 
-        # Run candidates through model with explicit positions
+        candidate_mask = (
+            torch.eye(top_k, device=self.device, dtype=torch.long)
+            .unsqueeze(0)
+            .expand(bs, top_k, top_k)
+        )
+        full_mask = torch.cat([prefix_mask, candidate_mask], dim=2)
+
+        dtype = self.backbone.dtype
+        full_mask = full_mask.unsqueeze(1).to(dtype=dtype)
+        full_mask = (1.0 - full_mask) * torch.finfo(dtype).min
+
+        # Score candidates
         cand_out = self.backbone(
             input_ids=candidate_ids,
-            attention_mask=expanded_mask,
+            attention_mask=full_mask,
             position_ids=candidate_positions,
             use_cache=False,
-            past_key_values=expanded_pkv,
+            past_key_values=prefix_pkv,
             output_hidden_states=True,
             return_dict=True,
         )
 
-        last_hidden = cand_out.hidden_states[-1][:, -1]
+        last_hidden = cand_out.hidden_states[-1]
         logits = self.score(last_hidden)
 
         if self.loss_type == "mle":

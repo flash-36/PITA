@@ -1,5 +1,5 @@
 experiment:
-  name: Phi_AIME22to24_Experiment
+  name: Llama-old_IMDBGen_Experiment
   seed: 42
 rounds_of_training: 1
 resume_from: null
@@ -9,7 +9,7 @@ system:
   attn_impl: sdpa
   clear_cache_interval: 10
 generation:
-  max_new_tokens: 38912
+  max_new_tokens: 4096
   temperature: 0.8
   top_p: 0.9
   use_chat_template: true
@@ -17,12 +17,12 @@ training:
   micro_batch_size: 4
   gradient_checkpointing: true
   datasets:
-  - AIME22to24
+  - IMDBGen
 data_collection:
   samples_per_example: 4
   seed: 42
   reward_batch_size: 64
-  chunk_size: 8
+  chunk_size: 128
   bradley_terry_sampling: true
   bradley_terry_beta: 1.0
 evaluation:
@@ -32,18 +32,18 @@ evaluation:
   - 1.0
   - 4.0
   num_samples: 8
-  batch_size: 16
+  batch_size: 32
   kl_sample_ratio: 0.1
   datasets_by_train:
-    AIME22to24:
-    - AIME22to24
+    IMDBGen:
+    - IMDBGen
 parallel_generation: false
 use_parallel_execution: true
 algos:
   PITA:
     epochs: 10
-    batch_size: 2
-    eval_batch_size: 4
+    batch_size: 32
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -60,8 +60,8 @@ algos:
       use_cache: true
   QSharp:
     epochs: 10
-    batch_size: 2
-    eval_batch_size: 4
+    batch_size: 32
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -78,8 +78,8 @@ algos:
       use_cache: true
   QSharp-HF:
     epochs: 10
-    batch_size: 2
-    eval_batch_size: 4
+    batch_size: 32
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -98,7 +98,7 @@ algos:
       top_k: 20
       use_cache: true
 model_pairs:
-- phi
+- llama-old
 datasets:
   AIME2025:
     train_size_cap: 0

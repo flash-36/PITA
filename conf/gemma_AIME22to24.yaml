@@ -9,7 +9,7 @@ system:
   attn_impl: sdpa
   clear_cache_interval: 10
 generation:
-  max_new_tokens: 1024
+  max_new_tokens: 38912
   temperature: 0.8
   top_p: 0.9
   use_chat_template: true
