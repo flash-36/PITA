@@ -302,10 +302,13 @@ def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResu
     # Import algorithms to trigger registration in worker process
     import pita.algos
     import pita.datasets
+    import multiprocessing as mp
 
-    # Setup context-aware logging in worker process
-    setup_context_logging()
-    intercept_stdout_stderr()
+    # Setup context-aware logging ONLY in worker process
+    # If in main process (sequential mode), logging is already set up
+    if mp.current_process().name != "MainProcess":
+        setup_context_logging()
+        intercept_stdout_stderr()
 
     # Unpack arguments
     cfg_dict, run_root_str, state_manager_dict = args

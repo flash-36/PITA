@@ -16,8 +16,9 @@ class StageFilter:
 def setup_stage_logging():
     """Configure loguru to use stage-aware formatting."""
     logger.remove()
+    # Use sys.__stderr__ instead of sys.stderr to avoid recursion if stderr is intercepted
     logger.add(
-        sys.stderr,
+        sys.__stderr__,
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {message}",
         level="INFO",
         filter=StageFilter(),

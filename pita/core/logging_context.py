@@ -102,8 +102,9 @@ def setup_context_logging():
     logger.remove()
     
     # Add handler with context prefix
+    # Use sys.__stderr__ instead of sys.stderr to avoid recursion if stderr is intercepted
     logger.add(
-        sys.stderr,
+        sys.__stderr__,
         format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level:<8}</level> | <cyan>{extra[context_prefix]}</cyan><level>{message}</level>",
         filter=ContextFilter(),
         colorize=True,
