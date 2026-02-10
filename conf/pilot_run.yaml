@@ -107,11 +107,11 @@ algos:
       top_k: 20
       use_cache: true
 model_pairs:
-- gemma
-- llama
+# - gemma
+# - llama
 - llama-old
 - phi
-- qwen
+# - qwen
 - qwen-math
 datasets:
   AIME2025:

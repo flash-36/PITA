@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any, Optional, Union
 from types import SimpleNamespace
 
@@ -52,6 +53,7 @@ class ValueClassifier(nn.Module):
             self.backbone.gradient_checkpointing_enable()
 
         self.loss_type = loss_type
+        self._has_sliding_window = getattr(self.backbone.config, "sliding_window", None) is not None
         hidden_size = int(getattr(self.backbone.config, "hidden_size"))
 
         if self.loss_type == "mle":
@@ -173,8 +175,10 @@ class ValueClassifier(nn.Module):
         prefix_pkv = prefix_out.past_key_values
         del prefix_out
 
-        # Determine past_len
-        if prefix_pkv is None:
+        # Determine past_len from the attention mask if available, as it's the ground truth for the prefix
+        if attention_mask is not None:
+            past_len = attention_mask.shape[-1]
+        elif prefix_pkv is None:
             past_len = 0
         elif hasattr(prefix_pkv, "get_seq_length"):
             past_len = prefix_pkv.get_seq_length()
@@ -210,13 +214,20 @@ class ValueClassifier(nn.Module):
         full_mask = full_mask.unsqueeze(1).to(dtype=dtype)
         full_mask = (1.0 - full_mask) * torch.finfo(dtype).min
 
-        # Score candidates
+        # Sliding-window models (e.g. Gemma) mutate the cache in-place and can't be
+        # rewound via crop, so we deep copy to keep prefix_pkv pristine.
+        # Full-attention models can be cheaply cropped after Phase 2 instead.
+        if self._has_sliding_window and prefix_pkv is not None:
+            phase2_cache = copy.deepcopy(prefix_pkv)
+        else:
+            phase2_cache = prefix_pkv
+
         cand_out = self.backbone(
             input_ids=candidate_ids,
             attention_mask=full_mask,
             position_ids=candidate_positions,
             use_cache=False,
-            past_key_values=prefix_pkv,
+            past_key_values=phase2_cache,
             output_hidden_states=True,
             return_dict=True,
         )
@@ -228,6 +239,16 @@ class ValueClassifier(nn.Module):
             logits = logits.view(bs, top_k, self.num_atoms)
         else:
             logits = logits.view(bs, top_k)
+
+        # For full-attention models, undo in-place cache mutation from Phase 2
+        if not self._has_sliding_window and prefix_pkv is not None:
+            if hasattr(prefix_pkv, "get_seq_length") and prefix_pkv.get_seq_length() > past_len:
+                if hasattr(prefix_pkv, "crop"):
+                    prefix_pkv.crop(past_len)
+                elif hasattr(prefix_pkv, "key_cache"):
+                    for i in range(len(prefix_pkv.key_cache)):
+                        prefix_pkv.key_cache[i] = prefix_pkv.key_cache[i][:, :, :past_len, :]
+                        prefix_pkv.value_cache[i] = prefix_pkv.value_cache[i][:, :, :past_len, :]
 
         return SimpleNamespace(logits=logits, past_key_values=prefix_pkv)
 

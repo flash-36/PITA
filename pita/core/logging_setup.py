@@ -53,5 +53,5 @@ class LogStream:
 def intercept_stdout_stderr():
     """Redirect stdout and stderr to loguru."""
     sys.stdout = LogStream("INFO")
-    sys.stderr = LogStream("ERROR")
+    sys.stderr = LogStream("DEBUG")
 

@@ -6,6 +6,6 @@ set -e
 echo "🚀 Starting Pilot Run to verify setup..."
 
 # Run the pilot check config
-python run_parallel.py --config-name=pilot_run
+python run_parallel.py --config-name=pilot_run #resume_from=/path/to/output/folder
 
 echo "✅ Pilot run finished successfully! You are ready to run the full experiment."
