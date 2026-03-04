@@ -1,5 +1,5 @@
 experiment:
-  name: Qwen-math_AIME22to24_Experiment
+  name: Qwen3_IMDBGen_Experiment
   seed: 42
 rounds_of_training: 1
 resume_from: null
@@ -9,15 +9,16 @@ system:
   attn_impl: sdpa
   clear_cache_interval: 10
 generation:
-  max_new_tokens: 38912
+  max_new_tokens: 4096
   temperature: 0.8
   top_p: 0.9
+  repetition_penalty: 1.0
   use_chat_template: true
 training:
   micro_batch_size: 4
   gradient_checkpointing: true
   datasets:
-  - AIME22to24
+  - IMDBGen
 data_collection:
   samples_per_example: 4
   seed: 42
@@ -35,9 +36,8 @@ evaluation:
   batch_size: 32
   kl_sample_ratio: 0.1
   datasets_by_train:
-    AIME22to24:
-    - AIME22to24
-parallel_generation: false
+    IMDBGen:
+    - IMDBGen
 use_parallel_execution: true
 algos:
   PITA:
@@ -98,7 +98,7 @@ algos:
       top_k: 20
       use_cache: true
 model_pairs:
-- qwen-math
+- qwen3
 datasets:
   AIME2025:
     train_size_cap: 0
@@ -108,6 +108,7 @@ datasets:
     question_key: question
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: AIME2025-II
     test_split: heldout
   AIME2024:
@@ -118,6 +119,7 @@ datasets:
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: default
     test_split: heldout
   GSM8K:
@@ -128,6 +130,7 @@ datasets:
     question_key: question
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: main
     test_split: test
   TLDR:
@@ -158,6 +161,7 @@ datasets:
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: ''
     test_split: heldout
   AIME22to24:
@@ -168,5 +172,6 @@ datasets:
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: default
     test_split: heldout

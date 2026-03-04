@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 from loguru import logger
 from pathlib import Path
 
@@ -58,43 +58,26 @@ class QSharpHFAlgorithm(ValueGuidedAlgorithms):
         cls_model: Optional[str] = None,
         run_root: Optional[Any] = None,
     ) -> None:
-        reward_scorer = None
-        if dataset in {"TLDR", "IMDBGen"}:
-            ds_cfg = cfg.datasets[dataset]
-            rm_model = str(ds_cfg.reward_model)
-            device = 0 if torch.cuda.is_available() else -1
-            reward_scorer = RewardScorer(
-                rm_model,
-                bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
-                bt_beta=float(cfg.data_collection.bradley_terry_beta),
-                device=device,
-                dtype=str(cfg.system.dtype),
-                batch_size=int(cfg.data_collection.reward_batch_size),
-            )
-            self._reward = reward_scorer
-
+        ds_cfg = cfg.datasets[dataset]
+        rm_model = str(ds_cfg.reward_model)
+        device = 0 if torch.cuda.is_available() else -1
+        self._reward = RewardScorer(
+            rm_model,
+            bt_sampling=bool(cfg.data_collection.bradley_terry_sampling),
+            bt_beta=float(cfg.data_collection.bradley_terry_beta),
+            device=device,
+            dtype=str(cfg.system.dtype),
+            batch_size=int(cfg.data_collection.reward_batch_size),
+        )
+        self._correctness_bonus = float(getattr(ds_cfg, "correctness_bonus", 0.0))
         try:
             super().generate_data(
                 cfg, ref_model, dataset, family, round_idx, cls_model, run_root
             )
         finally:
-            if reward_scorer is not None:
-                reward_scorer.cleanup()
-                if hasattr(self, "_reward"):
-                    del self._reward
-
-    def score_samples(
-        self, ex, y_a: str, y_b: str
-    ) -> Tuple[float, float, Optional[int]]:
-        ds = getattr(self, "_dataset", None)
-        if ds is not None and hasattr(ds, "is_correct"):
-            score_a = 1.0 if ds.is_correct(ex.answer, y_a) else 0.0
-            score_b = 1.0 if ds.is_correct(ex.answer, y_b) else 0.0
-            return score_a, score_b, None
-        if hasattr(self, "_reward") and self._reward is not None:
-            r_a, r_b, _ = self._reward.score_pair(ex.question, y_a, y_b)
-            return r_a, r_b, None
-        raise ValueError("No reward model available")
+            if hasattr(self, "_reward") and self._reward is not None:
+                self._reward.cleanup()
+                del self._reward
 
     def _rescore_with_proxy_rm(
         self, ds_raw: Dataset, proxy_rm: ValueClassifier, ref, use_chat_template: bool

@@ -419,31 +419,66 @@ class PITATrainer:
                 micro_bs = (
                     self.micro_batch_size if self.micro_batch_size > 0 else total_bs
                 )
+                is_bt = getattr(self.classifier, "loss_type", "") == "bradley_terry"
                 last_loss_val = 0.0
-                for start in range(0, total_bs, micro_bs):
-                    end = min(start + micro_bs, total_bs)
-                    mb_slice = slice(start, end)
-                    scale = (end - start) / max(1, total_bs)
-                    with autocast(
-                        device_type="cuda",
-                        dtype=self.amp_dtype,
-                        enabled=self.autocast_enabled,
-                    ):
-                        outputs = self.classifier(
-                            input_ids=input_ids[mb_slice],
-                            attention_mask=attention_mask[mb_slice],
-                            labels=labels[mb_slice],
-                            loss_mask=loss_mask[mb_slice],
-                            loss_weights=loss_weights[mb_slice],
-                            return_dict=True,
-                            use_cache=False,
-                        )
-                        loss = outputs.loss * scale
-                    if self.scaler.is_enabled():
-                        self.scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
-                    last_loss_val = float(loss.detach().item()) / max(scale, 1e-8)
+                if is_bt:
+                    # BT loss requires matched chosen/rejected pairs in each micro-batch.
+                    # Micro-batch over pair indices to keep pairing intact.
+                    pair_micro_bs = max(1, micro_bs // 2)
+                    for pair_start in range(0, num_chosen, pair_micro_bs):
+                        pair_end = min(pair_start + pair_micro_bs, num_chosen)
+                        mb_idx = torch.cat([
+                            torch.arange(pair_start, pair_end, device=device),
+                            torch.arange(num_chosen + pair_start, num_chosen + pair_end, device=device),
+                        ])
+                        scale = len(mb_idx) / max(1, total_bs)
+                        with autocast(
+                            device_type="cuda",
+                            dtype=self.amp_dtype,
+                            enabled=self.autocast_enabled,
+                        ):
+                            outputs = self.classifier(
+                                input_ids=input_ids[mb_idx],
+                                attention_mask=attention_mask[mb_idx],
+                                labels=labels[mb_idx],
+                                loss_mask=loss_mask[mb_idx],
+                                loss_weights=loss_weights[mb_idx],
+                                return_dict=True,
+                                use_cache=False,
+                            )
+                            loss = outputs.loss * scale
+                        if self.scaler.is_enabled():
+                            self.scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
+                        last_loss_val = float(loss.detach().item()) / max(scale, 1e-8)
+                else:
+                    for start in range(0, total_bs, micro_bs):
+                        end = min(start + micro_bs, total_bs)
+                        mb_slice = slice(start, end)
+                        scale = (end - start) / max(1, total_bs)
+                        with autocast(
+                            device_type="cuda",
+                            dtype=self.amp_dtype,
+                            enabled=self.autocast_enabled,
+                        ):
+                            outputs = self.classifier(
+                                input_ids=input_ids[mb_slice],
+                                attention_mask=attention_mask[mb_slice],
+                                labels=labels[mb_slice],
+                                loss_mask=loss_mask[mb_slice],
+                                loss_weights=loss_weights[mb_slice],
+                                return_dict=True,
+                                use_cache=False,
+                            )
+                            loss = outputs.loss * scale
+                        if self.scaler.is_enabled():
+                            self.scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
+                        last_loss_val = float(loss.detach().item()) / max(scale, 1e-8)
+                if self.scaler.is_enabled():
+                    self.scaler.unscale_(self.optimizer)
                 if self.grad_clip and self.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(
                         self.classifier.parameters(), self.grad_clip

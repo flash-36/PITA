@@ -12,6 +12,7 @@ generation:
   max_new_tokens: 4096
   temperature: 0.8
   top_p: 0.9
+  repetition_penalty: 1.0
   use_chat_template: true
 training:
   micro_batch_size: 4
@@ -37,7 +38,6 @@ evaluation:
   datasets_by_train:
     TLDR:
     - TLDR
-parallel_generation: false
 use_parallel_execution: true
 algos:
   PITA:
@@ -105,6 +105,7 @@ datasets:
     question_key: question
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: AIME2025-II
     test_split: heldout
   AIME2024:
@@ -115,6 +116,7 @@ datasets:
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: default
     test_split: heldout
   GSM8K:
@@ -125,6 +127,7 @@ datasets:
     question_key: question
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: main
     test_split: test
   TLDR:
@@ -155,6 +158,7 @@ datasets:
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: ''
     test_split: heldout
   AIME22to24:
@@ -165,5 +169,6 @@ datasets:
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: default
     test_split: heldout

@@ -1,5 +1,5 @@
 experiment:
-  name: Qwen-math_MATH_Experiment
+  name: Pilot_Check_QsharpHFOnly
   seed: 42
 rounds_of_training: 1
 resume_from: null
@@ -12,74 +12,83 @@ generation:
   max_new_tokens: 4096
   temperature: 0.8
   top_p: 0.9
+  repetition_penalty: 1.0
   use_chat_template: true
 training:
   micro_batch_size: 4
   gradient_checkpointing: true
   datasets:
+  - GSM8K
+  - IMDBGen
+  - TLDR
   - MATH
+  - AIME22to24
 data_collection:
   samples_per_example: 4
   seed: 42
   reward_batch_size: 64
-  chunk_size: 128
+  chunk_size: 8
   bradley_terry_sampling: true
   bradley_terry_beta: 1.0
 evaluation:
   etas:
-  - 0.25
-  - 0.5
   - 1.0
-  - 4.0
   num_samples: 8
-  batch_size: 32
+  batch_size: 8
   kl_sample_ratio: 0.1
   datasets_by_train:
+    GSM8K:
+    - GSM8K
+    TLDR:
+    - TLDR
+    IMDBGen:
+    - IMDBGen
     MATH:
     - MATH
-parallel_generation: false
+    AIME22to24:
+    - AIME22to24
 use_parallel_execution: true
 algos:
-  PITA:
-    epochs: 10
-    batch_size: 32
-    eval_batch_size: 32
-    max_batch_num_tokens: 16384
-    num_workers: 4
-    lr: 2.0e-05
-    weight_decay: 0.01
-    grad_clip: 1.0
-    loss_type: bce
-    num_atoms: 11
-    V_min: 0.0
-    V_max: 1.0
-    guidance:
-      eta: 1.0
-      mode: bernoulli
-      top_k: 20
-      use_cache: true
-  QSharp:
-    epochs: 10
-    batch_size: 32
-    eval_batch_size: 32
-    max_batch_num_tokens: 16384
-    num_workers: 4
-    lr: 2.0e-05
-    weight_decay: 0.01
-    grad_clip: 1.0
-    loss_type: bce
-    num_atoms: 11
-    V_min: 0.0
-    V_max: 1.0
-    guidance:
-      eta: 1.0
-      mode: bernoulli
-      top_k: 20
-      use_cache: true
+  # PITA:
+  #   epochs: 1
+  #   batch_size: 2
+  #   eval_batch_size: 4
+  #   max_batch_num_tokens: 16384
+  #   num_workers: 4
+  #   lr: 2.0e-05
+  #   weight_decay: 0.01
+  #   grad_clip: 1.0
+  #   loss_type: bce
+  #   num_atoms: 11
+  #   V_min: 0.0
+  #   V_max: 1.0
+  #   guidance:
+  #     eta: 1.0
+  #     mode: bernoulli
+  #     top_k: 20
+  #     use_cache: true
+  # QSharp:
+  #   epochs: 1
+  #   batch_size: 2
+  #   eval_batch_size: 4
+  #   max_batch_num_tokens: 16384
+  #   num_workers: 4
+  #   lr: 2.0e-05
+  #   weight_decay: 0.01
+  #   grad_clip: 1.0
+  #   loss_type: bce
+  #   num_atoms: 11
+  #   V_min: 0.0
+  #   V_max: 1.0
+  #   guidance:
+  #     eta: 1.0
+  #     mode: bernoulli
+  #     top_k: 20
+  #     use_cache: true
   QSharp-HF:
-    epochs: 10
-    batch_size: 32
-    eval_batch_size: 32
+    epochs: 1
+    batch_size: 2
+    eval_batch_size: 4
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -88,7 +97,7 @@ algos:
     loss_type: mle
     proxy_loss_type: bradley_terry
     proxy_lr: 2.0e-05
-    proxy_epochs: 5
+    proxy_epochs: 1
     num_atoms: 11
     V_min: 0.0
     V_max: 1.0
@@ -98,7 +107,11 @@ algos:
       top_k: 20
       use_cache: true
 model_pairs:
-- qwen-math
+- phi
+- gemma
+- llama-old
+- qwen3
+- qwen3-sm
 datasets:
   AIME2025:
     train_size_cap: 0
@@ -108,6 +121,7 @@ datasets:
     question_key: question
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: AIME2025-II
     test_split: heldout
   AIME2024:
@@ -118,21 +132,23 @@ datasets:
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: default
     test_split: heldout
   GSM8K:
-    train_size_cap: 0
-    test_size_cap: 0
+    train_size_cap: 8
+    test_size_cap: 8
     train_hf_config: main
     train_split: train
     question_key: question
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: main
-    test_split: test
+    test_split: heldout
   TLDR:
-    train_size_cap: 0
-    test_size_cap: 0
+    train_size_cap: 8
+    test_size_cap: 8
     train_hf_config: ''
     train_split: train
     question_key: prompt
@@ -141,8 +157,8 @@ datasets:
     test_hf_config: ''
     test_split: test
   IMDBGen:
-    train_size_cap: 0
-    test_size_cap: 5000
+    train_size_cap: 8
+    test_size_cap: 8
     train_hf_config: ''
     train_split: train
     question_key: text
@@ -151,22 +167,24 @@ datasets:
     test_hf_config: ''
     test_split: test
   MATH:
-    train_size_cap: 0
-    test_size_cap: 0
+    train_size_cap: 8
+    test_size_cap: 8
     train_hf_config: ''
     train_split: test
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: ''
     test_split: heldout
   AIME22to24:
-    train_size_cap: 0
-    test_size_cap: 0
+    train_size_cap: 8
+    test_size_cap: 8
     train_hf_config: default
     train_split: train
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: default
     test_split: heldout

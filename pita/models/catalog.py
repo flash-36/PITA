@@ -11,23 +11,29 @@ _ALIAS_TO_ID: Dict[str, str] = {
     "gemma-4b": "google/gemma-3-4b-it",
     "gpt2-medium": "openai-community/gpt2-medium",
     "gpt2": "openai-community/gpt2",
-    # Phi aliases
     "phi-mini": "microsoft/Phi-4-mini-reasoning",
     "phi-plus": "microsoft/Phi-4-reasoning-plus",
+    "qwen3-8b": "Qwen/Qwen3-8B",
+    "qwen3-4b": "Qwen/Qwen3-4B",
+    "qwen3-1.7b": "Qwen/Qwen3-1.7B",
+    "qwen3-0.6b": "Qwen/Qwen3-0.6B",
+    # Legacy aliases
     "qwen-7b": "Qwen/Qwen2.5-7B-Instruct",
     "qwen-1.5b": "Qwen/Qwen2.5-1.5B-Instruct",
     "qwen-math-7b": "Qwen/Qwen2.5-Math-7B-Instruct",
     "qwen-math-1.5b": "Qwen/Qwen2.5-Math-1.5B-Instruct",
 }
 
-
+# (ref_model_alias, value_classifier_alias)
 _FAMILY_TO_PAIR: Dict[str, Tuple[str, str]] = {
     "llama": ("llama-3b", "llama-1b"),
     "llama-old": ("llama-8b-v3.1", "llama-1b"),
     "gemma": ("gemma-4b", "gemma-1b"),
     "gpt": ("gpt2-medium", "gpt2"),
-    # Phi family: (ref_model_alias, value_classifier_alias)
     "phi": ("phi-plus", "phi-mini"),
+    "qwen3": ("qwen3-8b", "qwen3-1.7b"),
+    "qwen3-sm": ("qwen3-1.7b", "qwen3-0.6b"),
+    # Legacy
     "qwen": ("qwen-7b", "qwen-1.5b"),
     "qwen-math": ("qwen-math-7b", "qwen-math-1.5b"),
 }

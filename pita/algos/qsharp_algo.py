@@ -2,20 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, Tuple, List, Optional
 from datasets import Dataset
-from tqdm import tqdm
-
 from loguru import logger
 import torch
-import random
-from itertools import islice
-
 from pita.core.registry import register_algorithm
 from .base import ValueGuidedAlgorithms
 from pita.eval.evaluate import evaluate_pass1_maj8, evaluate_avg_reward
 from pita.core.io import (
     get_run_root,
     get_snapshot_paths,
-    merge_and_save_hf,
     mark_phase_complete,
     check_phase_complete,
 )
@@ -23,7 +17,6 @@ from pita.core.compute_tracker import get_compute_tracker, reset_compute_tracker
 from pita.trainers import QSharpTrainer
 from datasets import load_from_disk
 from pita.models.value_classifier import ValueClassifier
-from pita.core.prompts import build_instruction_prompt
 from pita.datasets.convert import convert_qsharp_rows_to_classifier_dataset
 from pita.models import RewardScorer
 
@@ -43,7 +36,6 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
         run_root: Optional[Any] = None,
     ) -> None:
         reward_scorer = None
-        # For non-verifiable datasets, set up a reward model for scoring
         if dataset in {"TLDR", "IMDBGen"}:
             ds_cfg = cfg.datasets[dataset]
             rm_model = str(ds_cfg.reward_model)
@@ -58,192 +50,15 @@ class QSharpAlgorithm(ValueGuidedAlgorithms):
             )
             self._reward = reward_scorer
 
-        snap_hf_prev, snap_hf, snap_csv = get_snapshot_paths(
-            self.algo_key, dataset, family, round_idx, run_root=run_root
-        )
-
-        random.seed(int(cfg.data_collection.seed))
-        # Build generator model: round 1 uses ref-only, later rounds can use guided
-        ref_hf = self._build_model(cfg, ref_model)
-
-        if int(round_idx) > 0 and cls_model is not None:
-            verifiable = {"AIME2025", "AIME2024", "AIME22to24", "GSM8K", "MATH"}
-            loss_type = "bce" if dataset in verifiable else "mle"
-            prev_classifier = ValueClassifier(
-                cls_model,
-                tokenizer=ref_hf.tokenizer,
-                device=ref_hf.model.device,
-                loss_type=loss_type,
-                num_atoms=int(self.cfg.num_atoms),
-                V_min=float(self.cfg.V_min),
-                V_max=float(self.cfg.V_max),
-                attn_impl=str(cfg.system.attn_impl),
-                dtype=str(cfg.system.amp_dtype),
-                gradient_checkpointing=bool(cfg.training.gradient_checkpointing),
+        try:
+            super().generate_data(
+                cfg, ref_model, dataset, family, round_idx, cls_model, run_root
             )
-            if run_root is None:
-                run_root = get_run_root()
-            ckpt_loaded = self.maybe_load_classifier_from_prev_round(
-                prev_classifier,
-                run_root=run_root,
-                dataset=dataset,
-                family=family,
-                round_idx=round_idx,
-                device=ref_hf.model.device,
-            )
-            if ckpt_loaded:
-                model = self.build_guided_with(
-                    cfg, ref=ref_hf, classifier=prev_classifier
-                )
-            else:
-                model = ref_hf
-        else:
-            model = ref_hf
-
-        ds = self._build_dataset(cfg, dataset)
-        self._dataset = ds
-        gen_cfg = model.gen_cfg
-
-        samples_per_example = int(cfg.data_collection.samples_per_example)
-        batch_size = int(cfg.algos[self.algo_key].batch_size)
-        chunk_size = int(getattr(cfg.data_collection, "chunk_size", 100))
-
-        limit = int(getattr(cfg.datasets[dataset], "train_size_cap", 0) or 0)
-        limit = limit if limit > 0 else len(ds)
-
-        # Collect all examples (lightweight - just metadata)
-        examples = []
-        for ex in islice(ds.iter(), limit):
-            prompt = ds.hydrate_prompt(ex.question)
-            examples.append({"ex": ex, "prompt": prompt})
-
-        logger.info(
-            f"🔄 Processing {len(examples)} examples in chunks of {chunk_size} (batch_size={batch_size})"
-        )
-
-        all_records: List[Dict[str, Any]] = []
-
-        # Process examples in chunks to reduce peak memory usage
-        for chunk_start in range(0, len(examples), chunk_size):
-            chunk_end = min(chunk_start + chunk_size, len(examples))
-            chunk_examples = examples[chunk_start:chunk_end]
-
-            logger.info(
-                f"📦 Processing chunk {chunk_start//chunk_size + 1}/{(len(examples) + chunk_size - 1)//chunk_size} "
-                f"(examples {chunk_start+1}-{chunk_end}/{len(examples)})"
-            )
-
-            # PHASE 1: Batch roll_in calls for this chunk
-            prompts = [item["prompt"] for item in chunk_examples]
-            rollouts = model.roll_in_batch(
-                prompts, gen_cfg.max_new_tokens, batch_size=batch_size
-            )
-
-            # PHASE 2: Prepare contexts for continuation
-            contexts_to_continue = []
-            for item, rollout in zip(chunk_examples, rollouts):
-                built_prompt = rollout["prompt"]
-                prompt_token_count = len(model.tokenizer(built_prompt)["input_ids"])
-                context_token_ids = rollout["context_ids"].tolist()
-                full_token_count = len(context_token_ids)
-                rollout_token_count = full_token_count - prompt_token_count
-
-                if rollout_token_count < 2:
-                    continue
-
-                for _ in range(samples_per_example):
-                    cutoff_tokens = random.randint(1, rollout_token_count - 1)
-                    context_prefix_ids = context_token_ids[
-                        : prompt_token_count + cutoff_tokens
-                    ]
-                    context_text = model.tokenizer.decode(
-                        context_prefix_ids, skip_special_tokens=True
-                    )
-                    solution_prefix_ids = context_prefix_ids[prompt_token_count:]
-                    solution_prefix_text = model.tokenizer.decode(
-                        solution_prefix_ids, skip_special_tokens=True
-                    )
-                    remaining_token_budget = gen_cfg.max_new_tokens - cutoff_tokens
-
-                    if remaining_token_budget >= 1:
-                        contexts_to_continue.append(
-                            {
-                                "ex": item["ex"],
-                                "prompt": item["prompt"],
-                                "context_text": context_text,
-                                "solution_prefix_text": solution_prefix_text,
-                                "cutoff_tokens": cutoff_tokens,
-                                "remaining_token_budget": remaining_token_budget,
-                            }
-                        )
-
-            if not contexts_to_continue:
-                logger.info(
-                    f"⏭️  Chunk {chunk_start//chunk_size + 1}: No valid contexts, skipping"
-                )
-                del rollouts
-                continue
-
-            # PHASE 3: Batch continue_from_context calls
-            all_contexts = [item["context_text"] for item in contexts_to_continue]
-            min_remaining_tokens = min(
-                item["remaining_token_budget"] for item in contexts_to_continue
-            )
-
-            greedy_continuations = model.continue_from_context_batch(
-                all_contexts, min_remaining_tokens, greedy=True, batch_size=batch_size
-            )
-            sampled_continuations = model.continue_from_context_batch(
-                all_contexts, min_remaining_tokens, greedy=False, batch_size=batch_size
-            )
-
-            # PHASE 4: Assemble samples and score
-            for ctx, y_ref, y_sample in zip(
-                contexts_to_continue, greedy_continuations, sampled_continuations
-            ):
-                y_a = ctx["solution_prefix_text"] + y_ref
-                y_b = ctx["solution_prefix_text"] + y_sample
-
-                score_a, score_b, preferred = self.score_samples(ctx["ex"], y_a, y_b)
-
-                all_records.append(
-                    {
-                        "question": ctx["ex"].question,
-                        "answer": ctx["ex"].answer,
-                        "prompt": ctx["prompt"],
-                        "t": ctx["cutoff_tokens"],
-                        "context": ctx["prompt"] + ctx["solution_prefix_text"],
-                        "y_a": y_a,
-                        "y_b": y_b,
-                        "score_a": score_a,
-                        "score_b": score_b,
-                        "preferred": preferred,
-                    }
-                )
-
-            # Clear chunk data to free memory
-            del rollouts, contexts_to_continue, all_contexts
-            del greedy_continuations, sampled_continuations
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            logger.info(
-                f"✅ Chunk {chunk_start//chunk_size + 1} complete: {len(all_records)} total records so far"
-            )
-
-        if not all_records:
+        finally:
             if reward_scorer is not None:
                 reward_scorer.cleanup()
-            return
-
-        logger.info(f"🎉 All chunks processed: {len(all_records)} total records")
-        new_ds = Dataset.from_list(all_records)
-        merge_and_save_hf(snap_hf_prev, new_ds, snap_hf, snap_csv)
-
-        if reward_scorer is not None:
-            reward_scorer.cleanup()
-            if hasattr(self, "_reward"):
-                del self._reward
+                if hasattr(self, "_reward"):
+                    del self._reward
 
     def resolve_ref_for_round(
         self,

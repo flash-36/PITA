@@ -318,6 +318,8 @@ class QSharpTrainer:
                     else:
                         loss.backward()
                     last_loss_val = float(loss.detach().item()) / max(scale, 1e-8)
+                if self.scaler.is_enabled():
+                    self.scaler.unscale_(self.optimizer)
                 if self.grad_clip and self.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(
                         self.classifier.parameters(), self.grad_clip

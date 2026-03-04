@@ -33,18 +33,18 @@ def get_run_root() -> Path:
 
 def check_disk_space(path: Path, required_gb: float = 5.0) -> bool:
     """Check if there's enough disk space available.
-    
+
     Args:
         path: Path to check disk space for
         required_gb: Required free space in GB
-        
+
     Returns:
         True if enough space available, False otherwise
     """
     try:
         stat = shutil.disk_usage(path)
         free_gb = stat.free / (1024**3)
-        
+
         if free_gb < required_gb:
             logger.warning(
                 f"⚠️  Low disk space: {free_gb:.2f} GB free (< {required_gb:.2f} GB recommended)"
@@ -107,7 +107,7 @@ def check_model_trained(
     run_root: Path,
 ) -> bool:
     """Check if model training is complete for a job.
-    
+
     For HF-based algorithms, checks for config.json which is only present after
     a full model save. For other algorithms (PITA, QSharp, QSharp-HF), checks
     for classifier.pt which is the trained classifier checkpoint.
@@ -117,12 +117,12 @@ def check_model_trained(
     model_path = run_root / "models" / algo_key / f"{dataset}_{family_cap}_r{r}"
     if not model_path.exists():
         return False
-    
+
     # Check for HF model files (DPO, GRPO, GRPO-HF after final training)
     has_hf_model = (model_path / "config.json").exists()
     # Check for classifier checkpoint (PITA, QSharp, QSharp-HF)
     has_classifier = (model_path / "classifier.pt").exists()
-    
+
     return has_hf_model or has_classifier
 
 
@@ -153,7 +153,9 @@ def check_base_eval_completed(
     run_root: Path,
 ) -> bool:
     """Check if base model evaluation is complete."""
-    result_path = run_root / "results" / "base_model" / str(family) / dataset / "results.json"
+    result_path = (
+        run_root / "results" / "base_model" / str(family) / dataset / "results.json"
+    )
     return result_path.exists()
 
 
@@ -163,7 +165,14 @@ def check_base_eval_cot8_completed(
     run_root: Path,
 ) -> bool:
     """Check if base model 8-shot CoT evaluation is complete."""
-    result_path = run_root / "results" / "base_model_cot8" / str(family) / dataset / "results.json"
+    result_path = (
+        run_root
+        / "results"
+        / "base_model_cot8"
+        / str(family)
+        / dataset
+        / "results.json"
+    )
     return result_path.exists()
 
 
@@ -215,72 +224,55 @@ def get_checkpoint_dir(
     """Get checkpoint directory for data generation."""
     family_cap = str(family).capitalize()
     r = int(round_idx) + 1
-    checkpoint_dir = run_root / "checkpoints" / algo_key / f"{dataset}_{family_cap}_r{r}"
+    checkpoint_dir = (
+        run_root / "checkpoints" / algo_key / f"{dataset}_{family_cap}_r{r}"
+    )
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     return checkpoint_dir
 
 
 def save_checkpoint(
     checkpoint_dir: Path,
-    worker_id: int,
+    key: str,
     records: list,
 ) -> None:
-    """Save checkpoint for a worker atomically."""
-    import json
-    checkpoint_file = checkpoint_dir / f"worker_{worker_id}.json"
-    temp_file = checkpoint_dir / f"worker_{worker_id}.json.tmp"
-    
-    try:
-        with open(temp_file, "w") as f:
-            json.dump(records, f)
-        temp_file.replace(checkpoint_file)
-    except Exception as e:
-        if temp_file.exists():
-            temp_file.unlink()
-        raise e
+    """Save checkpoint atomically. Key can be e.g. 'worker_0' or 'chunk_5'."""
+    checkpoint_file = checkpoint_dir / f"{key}.json"
+    temp_file = checkpoint_dir / f"{key}.json.tmp"
 
-
-def load_checkpoint(
-    checkpoint_dir: Path,
-    worker_id: int,
-) -> Optional[list]:
-    """Load checkpoint for a worker if it exists."""
-    import json
-    from loguru import logger
-    
-    checkpoint_file = checkpoint_dir / f"worker_{worker_id}.json"
-    if checkpoint_file.exists():
-        try:
-            with open(checkpoint_file, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"⚠️  Corrupted checkpoint file {checkpoint_file}: {e}")
-            logger.warning(f"⚠️  Skipping corrupted checkpoint")
-            return None
-    return None
+    with open(temp_file, "w") as f:
+        json.dump(records, f)
+    temp_file.replace(checkpoint_file)
 
 
 def load_all_checkpoints(checkpoint_dir: Path) -> list:
-    """Load all worker checkpoints, skipping corrupted ones."""
-    import json
-    from loguru import logger
-    
+    """Load all checkpoints (worker_*.json and chunk_*.json), skipping corrupted ones."""
     all_records = []
     if checkpoint_dir.exists():
-        for checkpoint_file in sorted(checkpoint_dir.glob("worker_*.json")):
+        for checkpoint_file in sorted(checkpoint_dir.glob("*.json")):
             try:
                 with open(checkpoint_file, "r") as f:
                     records = json.load(f)
                     all_records.extend(records)
             except (json.JSONDecodeError, ValueError) as e:
-                logger.warning(f"⚠️  Corrupted checkpoint file {checkpoint_file}: {e}")
-                logger.warning(f"⚠️  Skipping corrupted checkpoint")
+                logger.warning(f"Corrupted checkpoint {checkpoint_file}: {e}, skipping")
                 continue
     return all_records
+
+
+def get_saved_chunk_indices(checkpoint_dir: Path) -> set:
+    """Return set of chunk indices that have been checkpointed."""
+    indices = set()
+    if checkpoint_dir.exists():
+        for f in checkpoint_dir.glob("chunk_*.json"):
+            idx = int(f.stem.split("_", 1)[1])
+            indices.add(idx)
+    return indices
 
 
 def clear_checkpoints(checkpoint_dir: Path) -> None:
     """Clear all checkpoints in the directory."""
     if checkpoint_dir.exists():
         import shutil
+
         shutil.rmtree(checkpoint_dir)

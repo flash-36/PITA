@@ -119,6 +119,7 @@ def evaluate_base_models(
             max_new_tokens=int(cfg.generation.max_new_tokens),
             temperature=float(cfg.generation.temperature),
             top_p=float(cfg.generation.top_p),
+            repetition_penalty=float(cfg.generation.repetition_penalty),
             use_chat_template=bool(cfg.generation.use_chat_template),
             dtype=str(cfg.system.dtype),
             attn_impl=str(cfg.system.attn_impl),
@@ -247,6 +248,7 @@ def evaluate_base_models_cot8(
             max_new_tokens=int(cfg.generation.max_new_tokens),
             temperature=float(cfg.generation.temperature),
             top_p=float(cfg.generation.top_p),
+            repetition_penalty=float(cfg.generation.repetition_penalty),
             use_chat_template=bool(cfg.generation.use_chat_template),
             dtype=str(cfg.system.dtype),
             attn_impl=str(cfg.system.attn_impl),
@@ -577,6 +579,12 @@ def main(cfg: DictConfig) -> None:
         run_root = resume_path
     else:
         run_root = get_run_root()
+
+    # Persist run_root so sbatch scripts can auto-resume on resubmission
+    from hydra.core.hydra_config import HydraConfig
+    state_dir = Path(HydraConfig.get().runtime.cwd) / "run_state"
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / f"{HydraConfig.get().job.config_name}.path").write_text(str(run_root.resolve()))
 
     logger.add(
         str(run_root / "run.log"),

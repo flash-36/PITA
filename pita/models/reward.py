@@ -43,8 +43,7 @@ class RewardScorer:
             tokenizer=self._tokenizer,
             device=dev,
             model_kwargs={"torch_dtype": torch_dtype},
-            truncation=True,  # Truncate sequences that exceed model max_length
-            max_length=512,  # Standard max length for most reward models
+            truncation=True,
         )
 
     @property

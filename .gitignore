@@ -19,6 +19,7 @@ logs/
 *.out
 .cursor/
 conf/archive/
+run_state/
 
 
 

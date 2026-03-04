@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, Optional
 from loguru import logger
 import torch
 
@@ -46,6 +46,7 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             dtype=str(cfg.system.dtype),
             batch_size=int(cfg.data_collection.reward_batch_size),
         )
+        self._correctness_bonus = float(getattr(ds_cfg, "correctness_bonus", 0.0))
         try:
             return super().generate_data(
                 cfg=cfg,
@@ -290,9 +291,3 @@ class PITAAlgorithm(ValueGuidedAlgorithms):
             torch.cuda.empty_cache()
 
         return result
-
-    def score_samples(
-        self, ex, y_a: str, y_b: str
-    ) -> Tuple[float, float, Optional[int]]:
-        r_a, r_b, preferred = self._reward.score_pair(ex.question, y_a, y_b)
-        return r_a, r_b, preferred

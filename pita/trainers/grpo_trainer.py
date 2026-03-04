@@ -390,11 +390,12 @@ class GRPOTrainer:
                     else:
                         loss.backward()
 
+                if self.scaler.is_enabled():
+                    self.scaler.unscale_(self.optimizer)
                 if self.cfg.grad_clip and self.cfg.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(
                         self.policy.parameters(), self.cfg.grad_clip
                     )
-
                 if self.scaler.is_enabled():
                     self.scaler.step(self.optimizer)
                     self.scaler.update()

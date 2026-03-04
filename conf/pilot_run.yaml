@@ -12,6 +12,7 @@ generation:
   max_new_tokens: 4096
   temperature: 0.8
   top_p: 0.9
+  repetition_penalty: 1.0
   use_chat_template: true
 training:
   micro_batch_size: 4
@@ -23,18 +24,18 @@ training:
   - MATH
   - AIME22to24
 data_collection:
-  samples_per_example: 2
+  samples_per_example: 4
   seed: 42
   reward_batch_size: 64
-  chunk_size: 32
+  chunk_size: 8
   bradley_terry_sampling: true
   bradley_terry_beta: 1.0
 evaluation:
   etas:
   - 1.0
-  num_samples: 2
-  batch_size: 4
-  kl_sample_ratio: 0.5
+  num_samples: 8
+  batch_size: 8
+  kl_sample_ratio: 0.1
   datasets_by_train:
     GSM8K:
     - GSM8K
@@ -46,7 +47,6 @@ evaluation:
     - MATH
     AIME22to24:
     - AIME22to24
-parallel_generation: false
 use_parallel_execution: true
 algos:
   PITA:
@@ -54,7 +54,7 @@ algos:
     batch_size: 2
     eval_batch_size: 4
     max_batch_num_tokens: 16384
-    num_workers: 1
+    num_workers: 4
     lr: 2.0e-05
     weight_decay: 0.01
     grad_clip: 1.0
@@ -72,7 +72,7 @@ algos:
     batch_size: 2
     eval_batch_size: 4
     max_batch_num_tokens: 16384
-    num_workers: 1
+    num_workers: 4
     lr: 2.0e-05
     weight_decay: 0.01
     grad_clip: 1.0
@@ -90,7 +90,7 @@ algos:
     batch_size: 2
     eval_batch_size: 4
     max_batch_num_tokens: 16384
-    num_workers: 1
+    num_workers: 4
     lr: 2.0e-05
     weight_decay: 0.01
     grad_clip: 1.0
@@ -107,12 +107,11 @@ algos:
       top_k: 20
       use_cache: true
 model_pairs:
-# - gemma
-# - llama
-- llama-old
 - phi
-# - qwen
-- qwen-math
+- gemma
+- llama-old
+- qwen3
+- qwen3-sm
 datasets:
   AIME2025:
     train_size_cap: 0
@@ -122,6 +121,7 @@ datasets:
     question_key: question
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: AIME2025-II
     test_split: heldout
   AIME2024:
@@ -132,21 +132,23 @@ datasets:
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: default
     test_split: heldout
   GSM8K:
-    train_size_cap: 2
-    test_size_cap: 2
+    train_size_cap: 8
+    test_size_cap: 8
     train_hf_config: main
     train_split: train
     question_key: question
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: main
     test_split: heldout
   TLDR:
-    train_size_cap: 2
-    test_size_cap: 2
+    train_size_cap: 8
+    test_size_cap: 8
     train_hf_config: ''
     train_split: train
     question_key: prompt
@@ -155,8 +157,8 @@ datasets:
     test_hf_config: ''
     test_split: test
   IMDBGen:
-    train_size_cap: 2
-    test_size_cap: 2
+    train_size_cap: 8
+    test_size_cap: 8
     train_hf_config: ''
     train_split: train
     question_key: text
@@ -165,22 +167,24 @@ datasets:
     test_hf_config: ''
     test_split: test
   MATH:
-    train_size_cap: 2
-    test_size_cap: 2
+    train_size_cap: 8
+    test_size_cap: 8
     train_hf_config: ''
     train_split: test
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: ''
     test_split: heldout
   AIME22to24:
-    train_size_cap: 2
-    test_size_cap: 2
+    train_size_cap: 8
+    test_size_cap: 8
     train_hf_config: default
     train_split: train
     question_key: problem
     answer_key: answer
     reward_model: weqweasdas/RM-Gemma-2B
+    correctness_bonus: 5.0
     test_hf_config: default
     test_split: heldout
