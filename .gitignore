@@ -20,6 +20,7 @@ logs/
 .cursor/
 conf/archive/
 run_state/
+slurm_logs/
 
 
 
