@@ -43,7 +43,7 @@ algos:
   PITA:
     epochs: 10
     batch_size: 64
-    eval_batch_size: 64
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -61,7 +61,7 @@ algos:
   QSharp:
     epochs: 10
     batch_size: 64
-    eval_batch_size: 64
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05
@@ -79,7 +79,7 @@ algos:
   QSharp-HF:
     epochs: 10
     batch_size: 64
-    eval_batch_size: 64
+    eval_batch_size: 32
     max_batch_num_tokens: 16384
     num_workers: 4
     lr: 2.0e-05

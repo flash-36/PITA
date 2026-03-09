@@ -1,8 +1,9 @@
 #!/bin/bash
 # Submit all experiments as a Slurm dependency chain.
 #
-# Auto-resume: each sbatch reads run_state/{config}.path to find
-# the previous output dir. Just resubmit when the wall limit hits:
+# Each job auto-requeues on timeout (up to 5x per MaxBatchRequeue)
+# and auto-resumes from checkpoint via run_state/{config}.path.
+# The afterany chain waits for full completion across requeues.
 #
 #   bash submit_all.sh           # submit all 25 experiments
 #   bash submit_all.sh 8         # start from experiment #8

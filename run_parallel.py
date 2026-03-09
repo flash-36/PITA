@@ -17,6 +17,11 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from loguru import logger
 
+import time
+import json
+import traceback
+import torch.multiprocessing as mp
+
 from pita.core.io import create_subdir, save_json, get_run_root
 from pita.core.job_state import JobStateManager, JobState
 from pita.core.registry import get_algorithm_registry
@@ -279,6 +284,36 @@ def evaluate_base_models_cot8(
         torch.cuda.empty_cache()
 
     return results
+
+
+def _base_eval_worker(gpu_id: int, eval_fn_name: str, cfg_dict: dict, run_root_str: str, result_queue):
+    """Worker process for parallel base model evaluation."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    torch.cuda.set_device(0)
+
+    from omegaconf import OmegaConf
+    from pathlib import Path
+
+    setup_context_logging()
+    from pita.core.logging_setup import intercept_stdout_stderr
+    intercept_stdout_stderr()
+
+    cfg = OmegaConf.create(cfg_dict)
+    state_manager = JobStateManager(Path(run_root_str))
+
+    logger.info(f"🚀 Base eval worker started: {eval_fn_name} on GPU {gpu_id}")
+    result = {}
+    try:
+        if eval_fn_name == "base":
+            result = evaluate_base_models(cfg, run_root_str, state_manager)
+        elif eval_fn_name == "cot8":
+            result = evaluate_base_models_cot8(cfg, run_root_str, state_manager)
+    except Exception as e:
+        logger.error(f"❌ Base eval worker ({eval_fn_name}) failed: {e}")
+        traceback.print_exc()
+
+    result_queue.put((eval_fn_name, result))
 
 
 def execute_single_job(job: TrainingJob, device_id: int, args: tuple) -> JobResult:
@@ -704,18 +739,46 @@ def main(cfg: DictConfig) -> None:
     gpu_manager.clear_cache()
     gpu_manager.synchronize_all()
 
-    # Evaluate base models (after algorithm jobs, so it doesn't block parallel execution)
-    base_model_results = evaluate_base_models(cfg, run_root, state_manager)
-    logger.info(f"📊 Base model evaluation complete")
-
-    # Evaluate 8-shot CoT base model (for reasoning datasets)
-    cot8_results = {}
-    if any(
+    # Evaluate base models in parallel on separate GPUs
+    need_cot8 = any(
         ds in {"GSM8K", "MATH", "AIME2025", "AIME2024", "AIME22to24"}
         for ds in cfg.training.datasets
-    ):
-        cot8_results = evaluate_base_models_cot8(cfg, run_root, state_manager)
-        logger.info(f"📊 8-shot CoT base model evaluation complete")
+    )
+    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+    run_root_str = str(run_root)
+    available_gpus = gpu_manager.available_gpus
+
+    base_model_results = {}
+    cot8_results = {}
+
+    if need_cot8 and len(available_gpus) >= 2:
+        logger.info("🚀 Running base model + CoT8 evaluations in parallel on 2 GPUs")
+        ctx = mp.get_context("spawn")
+        result_queue = ctx.Queue()
+
+        workers = [
+            ctx.Process(target=_base_eval_worker, args=(available_gpus[0], "base", cfg_dict, run_root_str, result_queue)),
+            ctx.Process(target=_base_eval_worker, args=(available_gpus[1], "cot8", cfg_dict, run_root_str, result_queue)),
+        ]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+
+        while not result_queue.empty():
+            name, result = result_queue.get_nowait()
+            if name == "base":
+                base_model_results = result
+            elif name == "cot8":
+                cot8_results = result
+
+        logger.info("📊 Base model + CoT8 evaluations complete (parallel)")
+    else:
+        base_model_results = evaluate_base_models(cfg, run_root, state_manager)
+        logger.info("📊 Base model evaluation complete")
+        if need_cot8:
+            cot8_results = evaluate_base_models_cot8(cfg, run_root, state_manager)
+            logger.info("📊 8-shot CoT base model evaluation complete")
 
     # Save aggregated results to a central JSON for easy access
     final_payload = {
@@ -735,9 +798,5 @@ def main(cfg: DictConfig) -> None:
 
 
 if __name__ == "__main__":
-    # Set multiprocessing start method for CUDA
-    import torch.multiprocessing as mp
-
     mp.set_start_method("spawn", force=True)
-
     main()

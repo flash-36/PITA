@@ -54,6 +54,22 @@ MATH_8SHOT = [
         "q": "The sum of two numbers is 10 and their product is 21. What is the sum of their squares?",
         "a": "Let the numbers be $x$ and $y$. $x+y=10$ and $xy=21$. We want $x^2+y^2$. We know $(x+y)^2 = x^2+y^2+2xy$. So $10^2 = x^2+y^2+2(21)$, which is $100 = x^2+y^2+42$. Thus $x^2+y^2=58$. The answer is \\boxed{58}.",
     },
+    {
+        "q": "Find the area of a triangle with vertices at $(0,0)$, $(4,0)$, and $(0,3)$.",
+        "a": "The base along the $x$-axis has length 4 and the height along the $y$-axis has length 3. The area is $\\frac{1}{2} \\cdot 4 \\cdot 3 = 6$. The answer is \\boxed{6}.",
+    },
+    {
+        "q": "What is the remainder when $7^{2023}$ is divided by 5?",
+        "a": "We have $7 \\equiv 2 \\pmod{5}$. Powers of 2 mod 5 cycle with period 4: $2, 4, 3, 1$. Since $2023 = 4 \\cdot 505 + 3$, we get $7^{2023} \\equiv 2^3 = 8 \\equiv 3 \\pmod{5}$. The answer is \\boxed{3}.",
+    },
+    {
+        "q": "How many ways can you arrange the letters in the word BANANA?",
+        "a": "BANANA has 6 letters: B appears 1 time, A appears 3 times, N appears 2 times. The number of arrangements is $\\frac{6!}{3!\\cdot 2!} = \\frac{720}{12} = 60$. The answer is \\boxed{60}.",
+    },
+    {
+        "q": "What is the sum of all integer values of $x$ satisfying $|x - 3| \\le 5$?",
+        "a": "The inequality gives $-5 \\le x - 3 \\le 5$, so $-2 \\le x \\le 8$. The integers are $-2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8$. Their sum is $\\frac{11 \\cdot (-2+8)}{2} = \\frac{11 \\cdot 6}{2} = 33$. The answer is \\boxed{33}.",
+    },
 ]
 
 # Standard 8-shot examples for AIME
@@ -69,6 +85,26 @@ AIME_8SHOT = [
     {
         "q": "Find the number of positive integers $n < 100$ such that $n$ is a multiple of 3 and $n+1$ is a multiple of 4.",
         "a": "We have $n = 3k$ and $n = 4m - 1$. So $3k = 4m - 1$, or $4m - 3k = 1$. A solution is $m=1, k=1$, giving $n=3$. The general solution is $n = 3 + 12j$. For $n < 100$, $12j < 97$, so $j \in \{0, 1, ..., 8\}$. There are 9 such integers. The answer is \\boxed{9}.",
+    },
+    {
+        "q": "Let $S = \\{1, 2, 3, \\ldots, 10\\}$. How many subsets of $S$ contain at least one odd number?",
+        "a": "Total subsets of $S$ is $2^{10} = 1024$. Subsets with no odd numbers are subsets of $\\{2,4,6,8,10\\}$, which number $2^5 = 32$. So subsets with at least one odd number: $1024 - 32 = 992$. The answer is \\boxed{992}.",
+    },
+    {
+        "q": "Find the sum of all positive divisors of 120.",
+        "a": "The prime factorization is $120 = 2^3 \\cdot 3 \\cdot 5$. The sum of divisors is $(1+2+4+8)(1+3)(1+5) = 15 \\cdot 4 \\cdot 6 = 360$. The answer is \\boxed{360}.",
+    },
+    {
+        "q": "The Fibonacci sequence satisfies $a_1 = 1$, $a_2 = 1$, and $a_n = a_{n-1} + a_{n-2}$ for $n \\ge 3$. Find the remainder when $a_{20}$ is divided by 100.",
+        "a": "Computing the Fibonacci sequence mod 100: $1,1,2,3,5,8,13,21,34,55,89,44,33,77,10,87,97,84,81,65$. So $a_{20} \\equiv 65 \\pmod{100}$. The answer is \\boxed{65}.",
+    },
+    {
+        "q": "How many integers from 1 to 1000 are divisible by neither 3 nor 5?",
+        "a": "By inclusion-exclusion: divisible by 3 is $\\lfloor 1000/3 \\rfloor = 333$, by 5 is $\\lfloor 1000/5 \\rfloor = 200$, by 15 is $\\lfloor 1000/15 \\rfloor = 66$. Divisible by 3 or 5: $333+200-66=467$. Neither: $1000-467=533$. The answer is \\boxed{533}.",
+    },
+    {
+        "q": "In triangle $ABC$, $AB = 13$, $BC = 14$, and $CA = 15$. Find the area of the triangle.",
+        "a": "By Heron's formula with $s = (13+14+15)/2 = 21$: Area $= \\sqrt{21 \\cdot 8 \\cdot 7 \\cdot 6} = \\sqrt{7056} = 84$. The answer is \\boxed{84}.",
     },
 ]
 

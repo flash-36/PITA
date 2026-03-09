@@ -632,7 +632,6 @@ def evaluate_pass1_maj8(
             for _ in range(start_n, num_samples):
                 extra_prompts_data.append((idx, item["built"]))
 
-        # Track saved scores for fast KL computation (only first sample per example)
         saved_scores_map: Dict[int, torch.Tensor] = {}
         use_fast_kl = isinstance(model, GuidedHFModel)
 
@@ -653,34 +652,77 @@ def evaluate_pass1_maj8(
             )
             gen_start = time.time()
 
-            # Use small chunk size for score-heavy generation to avoid RAM peak
-            score_chunk_size = batch_size * 2
+            if use_fast_kl:
+                # Separate score-needing from non-score-needing prompts to avoid
+                # passing output_scores=True to large batches (stores full vocab
+                # logits at every generation step, causing OOM).
+                no_score_items = []
+                score_items = []
+                for item in first_prompts_data:
+                    if item[0] in kl_sample_indices:
+                        score_items.append(item)
+                    else:
+                        no_score_items.append(item)
 
-            for chunk_start in range(0, len(first_prompts_data), score_chunk_size):
-                chunk_end = min(chunk_start + score_chunk_size, len(first_prompts_data))
-                chunk_items = first_prompts_data[chunk_start:chunk_end]
-                chunk_prompts = [item[1] for item in chunk_items]
-                chunk_indices = [item[0] for item in chunk_items]
+                def _save_phase1_checkpoint():
+                    if save_dir is not None:
+                        _save_eval_checkpoint(Path(save_dir), {
+                            "predictions": {
+                                str(i): p for i, p in enumerate(grouped_preds) if p
+                            },
+                            "completed_indices": [
+                                i for i, p in enumerate(grouped_preds) if len(p) == num_samples
+                            ],
+                            "num_samples": num_samples,
+                        })
 
-                needs_scores = use_fast_kl and any(
-                    idx in kl_sample_indices for idx in chunk_indices
-                )
+                # Generate non-score examples at full batch size
+                if no_score_items:
+                    for chunk_start in range(0, len(no_score_items), batch_size * 2):
+                        chunk_end = min(chunk_start + batch_size * 2, len(no_score_items))
+                        chunk_items = no_score_items[chunk_start:chunk_end]
+                        chunk_prompts = [item[1] for item in chunk_items]
+                        chunk_indices = [item[0] for item in chunk_items]
+                        chunk_preds = model.continue_from_context_batch(
+                            chunk_prompts,
+                            model.gen_cfg.max_new_tokens,
+                            greedy=False,
+                            batch_size=batch_size,
+                        )
+                        for ex_idx, pred in zip(chunk_indices, chunk_preds):
+                            grouped_preds[ex_idx].append(pred)
+                        _save_phase1_checkpoint()
 
-                if needs_scores:
-                    chunk_preds, chunk_scores = model.continue_from_context_batch(
-                        chunk_prompts,
-                        model.gen_cfg.max_new_tokens,
-                        greedy=False,
-                        batch_size=batch_size,
-                        return_scores=True,
+                # Generate score examples with small batch to cap score memory
+                score_batch = max(1, min(4, batch_size))
+                if score_items:
+                    logger.info(
+                        f"📊 Generating {len(score_items)} KL-sampled examples with batch_size={score_batch}"
                     )
-                    for i, (ex_idx, pred, scores) in enumerate(
-                        zip(chunk_indices, chunk_preds, chunk_scores)
-                    ):
-                        grouped_preds[ex_idx].append(pred)
-                        if ex_idx in kl_sample_indices and scores is not None:
-                            saved_scores_map[ex_idx] = scores
-                else:
+                    for chunk_start in range(0, len(score_items), score_batch * 2):
+                        chunk_end = min(chunk_start + score_batch * 2, len(score_items))
+                        chunk_items = score_items[chunk_start:chunk_end]
+                        chunk_prompts = [item[1] for item in chunk_items]
+                        chunk_indices = [item[0] for item in chunk_items]
+                        chunk_preds, chunk_scores = model.continue_from_context_batch(
+                            chunk_prompts,
+                            model.gen_cfg.max_new_tokens,
+                            greedy=False,
+                            batch_size=score_batch,
+                            return_scores=True,
+                        )
+                        for ex_idx, pred, scores in zip(chunk_indices, chunk_preds, chunk_scores):
+                            grouped_preds[ex_idx].append(pred)
+                            if scores is not None:
+                                saved_scores_map[ex_idx] = scores.cpu()
+                        _save_phase1_checkpoint()
+            else:
+                score_chunk_size = batch_size * 2
+                for chunk_start in range(0, len(first_prompts_data), score_chunk_size):
+                    chunk_end = min(chunk_start + score_chunk_size, len(first_prompts_data))
+                    chunk_items = first_prompts_data[chunk_start:chunk_end]
+                    chunk_prompts = [item[1] for item in chunk_items]
+                    chunk_indices = [item[0] for item in chunk_items]
                     chunk_preds = model.continue_from_context_batch(
                         chunk_prompts,
                         model.gen_cfg.max_new_tokens,
@@ -1011,41 +1053,67 @@ def evaluate_avg_reward(
             logger.info(
                 f"🔄 Generating {len(remaining_prompts)} predictions ({len(preds)} already cached)..."
             )
+
             if use_fast_kl:
-                logger.info(
-                    f"📊 Using fast KL computation (saving scores for {len(kl_sample_indices)} examples)"
-                )
+                # Collect results by global index so order is preserved
+                pred_by_idx: Dict[int, str] = {}
+                score_by_idx: Dict[int, Optional[torch.Tensor]] = {}
 
-            # Use small chunk size for score-heavy generation to avoid RAM peak
-            score_chunk_size = batch_size * 2
+                # Separate score-needing from non-score-needing prompts to avoid
+                # OOM from output_scores=True (stores full vocab logits per step).
+                no_score_items = []
+                score_items = []
+                for i, prompt in enumerate(remaining_prompts):
+                    global_idx = start_idx + i
+                    if global_idx in kl_sample_indices:
+                        score_items.append((global_idx, prompt))
+                    else:
+                        no_score_items.append((global_idx, prompt))
 
-            for chunk_start in range(0, len(remaining_prompts), score_chunk_size):
-                chunk_end = min(chunk_start + score_chunk_size, len(remaining_prompts))
-                chunk_prompts = remaining_prompts[chunk_start:chunk_end]
-                global_start = start_idx + chunk_start
-
-                # Check if any example in this chunk needs scores for KL
-                chunk_needs_scores = use_fast_kl and any(
-                    (global_start + i) in kl_sample_indices
-                    for i in range(len(chunk_prompts))
-                )
-
-                if chunk_needs_scores:
-                    chunk_preds, chunk_scores = model.continue_from_context_batch(
-                        chunk_prompts,
+                # Generate non-score examples at full batch size
+                for chunk_start in range(0, len(no_score_items), batch_size * 2):
+                    chunk_end = min(chunk_start + batch_size * 2, len(no_score_items))
+                    chunk = no_score_items[chunk_start:chunk_end]
+                    chunk_preds = model.continue_from_context_batch(
+                        [p for _, p in chunk],
                         model.gen_cfg.max_new_tokens,
                         greedy=False,
                         batch_size=batch_size,
+                    )
+                    for (gidx, _), pred in zip(chunk, chunk_preds):
+                        pred_by_idx[gidx] = pred
+                        score_by_idx[gidx] = None
+
+                # Generate score examples with small batch to cap score memory
+                score_batch = max(1, min(4, batch_size))
+                if score_items:
+                    logger.info(
+                        f"📊 Generating {len(score_items)} KL-sampled examples with batch_size={score_batch}"
+                    )
+                for chunk_start in range(0, len(score_items), score_batch * 2):
+                    chunk_end = min(chunk_start + score_batch * 2, len(score_items))
+                    chunk = score_items[chunk_start:chunk_end]
+                    chunk_preds, chunk_scores = model.continue_from_context_batch(
+                        [p for _, p in chunk],
+                        model.gen_cfg.max_new_tokens,
+                        greedy=False,
+                        batch_size=score_batch,
                         return_scores=True,
                     )
-                    preds.extend(chunk_preds)
-                    # Only save scores for KL-sampled examples
-                    for i, score in enumerate(chunk_scores):
-                        if (global_start + i) in kl_sample_indices:
-                            saved_scores.append(score)
-                        else:
-                            saved_scores.append(None)
-                else:
+                    for (gidx, _), pred, sc in zip(chunk, chunk_preds, chunk_scores):
+                        pred_by_idx[gidx] = pred
+                        score_by_idx[gidx] = sc.cpu() if sc is not None else None
+
+                # Reconstruct in original order
+                for i in range(len(remaining_prompts)):
+                    gidx = start_idx + i
+                    preds.append(pred_by_idx[gidx])
+                    saved_scores.append(score_by_idx[gidx])
+            else:
+                score_chunk_size = batch_size * 2
+                for chunk_start in range(0, len(remaining_prompts), score_chunk_size):
+                    chunk_end = min(chunk_start + score_chunk_size, len(remaining_prompts))
+                    chunk_prompts = remaining_prompts[chunk_start:chunk_end]
                     chunk_preds = model.continue_from_context_batch(
                         chunk_prompts,
                         model.gen_cfg.max_new_tokens,
@@ -1055,14 +1123,13 @@ def evaluate_avg_reward(
                     preds.extend(chunk_preds)
                     saved_scores.extend([None] * len(chunk_preds))
 
-                # Save checkpoint
-                if save_dir is not None:
-                    checkpoint_data = {"predictions": preds}
-                    _save_eval_checkpoint(Path(save_dir), checkpoint_data)
+            # Save checkpoint
+            if save_dir is not None:
+                checkpoint_data = {"predictions": preds}
+                _save_eval_checkpoint(Path(save_dir), checkpoint_data)
 
-                import gc
-
-                gc.collect()
+            import gc
+            gc.collect()
 
             logger.info(f"✅ Generation complete")
         else:
