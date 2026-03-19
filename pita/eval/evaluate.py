@@ -868,7 +868,7 @@ def evaluate_pass1_maj8(
                 ref_model,
                 prompt_texts=pass1_prompts,
                 continuation_texts=pass1_conts,
-                batch_size=batch_size,
+                batch_size=min(batch_size, 4),
                 sample_ratio=kl_sample_ratio,
                 save_dir=Path(save_dir) if save_dir else None,
             )
@@ -1145,7 +1145,7 @@ def evaluate_avg_reward(
                 ref_model,
                 prompt_texts=all_prompts,
                 continuation_texts=preds,
-                batch_size=batch_size,
+                batch_size=min(batch_size, 4),
                 sample_ratio=kl_sample_ratio,
                 save_dir=Path(save_dir) if save_dir else None,
             )

@@ -4,6 +4,7 @@
 #SBATCH --qos=olympus-research-gpu
 #SBATCH --gres=gpu:a100:4
 #SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
 #SBATCH -t 1-00:00:00
 #SBATCH --signal=B:USR1@300
 #SBATCH --requeue
@@ -19,6 +20,10 @@ handle_timeout() {
   exit 0
 }
 trap handle_timeout USR1
+
+ulimit -v unlimited
+export ARROW_DEFAULT_MEMORY_POOL=system
+export TOKENIZERS_PARALLELISM=false
 
 echo "Job $SLURM_JOB_ID on $(hostname) ($(date))"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
